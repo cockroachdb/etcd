@@ -1,17 +1,36 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package etcdserver
 
 import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"path"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
 	pb "github.com/coreos/etcd/etcdserver/etcdserverpb"
-	"github.com/coreos/etcd/pkg"
+	"github.com/coreos/etcd/pkg/testutil"
+	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/store"
@@ -69,6 +88,16 @@ func TestDoLocalAction(t *testing.T) {
 			},
 		},
 		{
+			pb.Request{Method: "HEAD", ID: 1},
+			Response{Event: &store.Event{}}, nil,
+			[]action{
+				action{
+					name:   "Get",
+					params: []interface{}{"", false, false},
+				},
+			},
+		},
+		{
 			pb.Request{Method: "BADMETHOD", ID: 1},
 			Response{}, ErrUnknownMethod, []action{},
 		},
@@ -106,6 +135,10 @@ func TestDoBadLocalAction(t *testing.T) {
 		},
 		{
 			pb.Request{Method: "GET", ID: 1},
+			[]action{action{name: "Get"}},
+		},
+		{
+			pb.Request{Method: "HEAD", ID: 1},
 			[]action{action{name: "Get"}},
 		},
 	}
@@ -367,6 +400,86 @@ func TestApplyRequest(t *testing.T) {
 	}
 }
 
+func TestApplyRequestOnAdminMemberAttributes(t *testing.T) {
+	cl := newTestCluster([]Member{{ID: 1}})
+	srv := &EtcdServer{
+		store:   &storeRecorder{},
+		Cluster: cl,
+	}
+	req := pb.Request{
+		Method: "PUT",
+		ID:     1,
+		Path:   path.Join(storeMembersPrefix, strconv.FormatUint(1, 16), attributesSuffix),
+		Val:    `{"Name":"abc","ClientURLs":["http://127.0.0.1:4001"]}`,
+	}
+	srv.applyRequest(req)
+	w := Attributes{Name: "abc", ClientURLs: []string{"http://127.0.0.1:4001"}}
+	if g := cl.Member(1).Attributes; !reflect.DeepEqual(g, w) {
+		t.Errorf("attributes = %v, want %v", g, w)
+	}
+}
+
+// TODO: test ErrIDRemoved
+func TestApplyConfChangeError(t *testing.T) {
+	nodes := []uint64{1, 2, 3}
+	removed := map[types.ID]bool{4: true}
+	tests := []struct {
+		cc   raftpb.ConfChange
+		werr error
+	}{
+		{
+			raftpb.ConfChange{
+				Type:   raftpb.ConfChangeAddNode,
+				NodeID: 4,
+			},
+			ErrIDRemoved,
+		},
+		{
+			raftpb.ConfChange{
+				Type:   raftpb.ConfChangeRemoveNode,
+				NodeID: 4,
+			},
+			ErrIDRemoved,
+		},
+		{
+			raftpb.ConfChange{
+				Type:   raftpb.ConfChangeAddNode,
+				NodeID: 1,
+			},
+			ErrIDExists,
+		},
+		{
+			raftpb.ConfChange{
+				Type:   raftpb.ConfChangeRemoveNode,
+				NodeID: 5,
+			},
+			ErrIDNotFound,
+		},
+	}
+	for i, tt := range tests {
+		n := &nodeRecorder{}
+		cl := &Cluster{removed: removed}
+		srv := &EtcdServer{
+			node:    n,
+			Cluster: cl,
+		}
+		err := srv.applyConfChange(tt.cc, nodes)
+		if err != tt.werr {
+			t.Errorf("#%d: applyConfChange error = %v, want %v", i, err, tt.werr)
+		}
+		cc := raftpb.ConfChange{Type: tt.cc.Type, NodeID: raft.None}
+		w := []action{
+			{
+				name:   "ApplyConfChange",
+				params: []interface{}{cc},
+			},
+		}
+		if g := n.Action(); !reflect.DeepEqual(g, w) {
+			t.Errorf("#%d: action = %+v, want %+v", i, g, w)
+		}
+	}
+}
+
 func TestClusterOf1(t *testing.T) { testServer(t, 1) }
 func TestClusterOf3(t *testing.T) { testServer(t, 3) }
 
@@ -388,19 +501,20 @@ func testServer(t *testing.T, ns uint64) {
 		ids[i] = i + 1
 	}
 	members := mustMakePeerSlice(t, ids...)
-
 	for i := uint64(0); i < ns; i++ {
 		id := i + 1
 		n := raft.StartNode(id, members, 10, 1)
 		tk := time.NewTicker(10 * time.Millisecond)
 		defer tk.Stop()
+		cl := newCluster("abc")
+		cl.SetStore(&storeRecorder{})
 		srv := &EtcdServer{
-			node:         n,
-			store:        store.New(),
-			send:         send,
-			storage:      &storageRecorder{},
-			ticker:       tk.C,
-			ClusterStore: &clusterStoreRecorder{},
+			node:    n,
+			store:   store.New(),
+			send:    send,
+			storage: &storageRecorder{},
+			Ticker:  tk.C,
+			Cluster: cl,
 		}
 		srv.start()
 		ss[i] = srv
@@ -461,13 +575,15 @@ func TestDoProposal(t *testing.T) {
 		tk := make(chan time.Time)
 		// this makes <-tk always successful, which accelerates internal clock
 		close(tk)
+		cl := newCluster("abc")
+		cl.SetStore(&storeRecorder{})
 		srv := &EtcdServer{
-			node:         n,
-			store:        st,
-			send:         func(_ []raftpb.Message) {},
-			storage:      &storageRecorder{},
-			ticker:       tk,
-			ClusterStore: &clusterStoreRecorder{},
+			node:    n,
+			store:   st,
+			send:    func(_ []raftpb.Message) {},
+			storage: &storageRecorder{},
+			Ticker:  tk,
+			Cluster: cl,
 		}
 		srv.start()
 		resp, err := srv.Do(ctx, tt)
@@ -513,12 +629,24 @@ func TestDoProposalCancelled(t *testing.T) {
 	if len(gaction) != 0 {
 		t.Errorf("len(action) = %v, want 0", len(gaction))
 	}
-	if err != context.Canceled {
-		t.Fatalf("err = %v, want %v", err, context.Canceled)
+	if err != ErrCanceled {
+		t.Fatalf("err = %v, want %v", err, ErrCanceled)
 	}
 	w := []action{action{name: "Register1"}, action{name: "Trigger1"}}
 	if !reflect.DeepEqual(wait.action, w) {
 		t.Errorf("wait.action = %+v, want %+v", wait.action, w)
+	}
+}
+
+func TestDoProposalTimeout(t *testing.T) {
+	ctx, _ := context.WithTimeout(context.Background(), 0)
+	srv := &EtcdServer{
+		node: &nodeRecorder{},
+		w:    &waitRecorder{},
+	}
+	_, err := srv.Do(ctx, pb.Request{Method: "PUT", ID: 1})
+	if err != ErrTimeout {
+		t.Fatalf("err = %v, want %v", err, ErrTimeout)
 	}
 }
 
@@ -537,7 +665,7 @@ func TestDoProposalStopped(t *testing.T) {
 		store:   st,
 		send:    func(_ []raftpb.Message) {},
 		storage: &storageRecorder{},
-		ticker:  tk,
+		Ticker:  tk,
 	}
 	srv.start()
 
@@ -573,7 +701,7 @@ func TestSync(t *testing.T) {
 		t.Errorf("CallSyncTime = %v, want < %v", d, time.Millisecond)
 	}
 
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	data := n.data()
 	if len(data) != 1 {
 		t.Fatalf("len(proposeData) = %d, want 1", len(data))
@@ -604,7 +732,7 @@ func TestSyncTimeout(t *testing.T) {
 
 	// give time for goroutine in sync to cancel
 	// TODO: use fake clock
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	w := []action{action{name: "Propose blocked"}}
 	if g := n.Action(); !reflect.DeepEqual(g, w) {
 		t.Errorf("action = %v, want %v", g, w)
@@ -637,7 +765,7 @@ func TestSyncTrigger(t *testing.T) {
 		store:      &storeRecorder{},
 		send:       func(_ []raftpb.Message) {},
 		storage:    &storageRecorder{},
-		syncTicker: st,
+		SyncTicker: st,
 	}
 	srv.start()
 	// trigger the server to become a leader and accept sync requests
@@ -705,12 +833,12 @@ func TestTriggerSnap(t *testing.T) {
 	st := &storeRecorder{}
 	p := &storageRecorder{}
 	s := &EtcdServer{
-		store:        st,
-		send:         func(_ []raftpb.Message) {},
-		storage:      p,
-		node:         n,
-		snapCount:    10,
-		ClusterStore: &clusterStoreRecorder{},
+		store:     st,
+		send:      func(_ []raftpb.Message) {},
+		storage:   p,
+		node:      n,
+		snapCount: 10,
+		Cluster:   &Cluster{},
 	}
 
 	s.start()
@@ -723,11 +851,12 @@ func TestTriggerSnap(t *testing.T) {
 	gaction := p.Action()
 	// each operation is recorded as a Save
 	// BootstrapConfig/Nop + (SnapCount - 1) * Puts + Cut + SaveSnap = Save + (SnapCount - 1) * Save + Cut + SaveSnap
-	if len(gaction) != 2+int(s.snapCount) {
-		t.Fatalf("len(action) = %d, want %d", len(gaction), 2+int(s.snapCount))
+	wcnt := 2 + int(s.snapCount)
+	if len(gaction) != wcnt {
+		t.Fatalf("len(action) = %d, want %d", len(gaction), wcnt)
 	}
-	if !reflect.DeepEqual(gaction[11], action{name: "SaveSnap"}) {
-		t.Errorf("action = %s, want SaveSnap", gaction[11])
+	if !reflect.DeepEqual(gaction[wcnt-1], action{name: "SaveSnap"}) {
+		t.Errorf("action = %s, want SaveSnap", gaction[wcnt-1])
 	}
 }
 
@@ -747,7 +876,7 @@ func TestRecvSnapshot(t *testing.T) {
 	s.start()
 	n.readyc <- raft.Ready{Snapshot: raftpb.Snapshot{Index: 1}}
 	// make goroutines move forward to receive snapshot
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	s.Stop()
 
 	wactions := []action{action{name: "Recovery"}}
@@ -775,12 +904,12 @@ func TestRecvSlowSnapshot(t *testing.T) {
 	s.start()
 	n.readyc <- raft.Ready{Snapshot: raftpb.Snapshot{Index: 1}}
 	// make goroutines move forward to receive snapshot
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	action := st.Action()
 
 	n.readyc <- raft.Ready{Snapshot: raftpb.Snapshot{Index: 1}}
 	// make goroutines move forward to receive snapshot
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	s.Stop()
 
 	if g := st.Action(); !reflect.DeepEqual(g, action) {
@@ -791,76 +920,75 @@ func TestRecvSlowSnapshot(t *testing.T) {
 // TestAddMember tests AddMember can propose and perform node addition.
 func TestAddMember(t *testing.T) {
 	n := newNodeConfChangeCommitterRecorder()
-	cs := &clusterStoreRecorder{}
+	n.readyc <- raft.Ready{
+		SoftState: &raft.SoftState{
+			RaftState: raft.StateLeader,
+			Nodes:     []uint64{2345, 3456},
+		},
+	}
+	cl := newTestCluster(nil)
+	cl.SetStore(&storeRecorder{})
 	s := &EtcdServer{
-		node:         n,
-		store:        &storeRecorder{},
-		send:         func(_ []raftpb.Message) {},
-		storage:      &storageRecorder{},
-		ClusterStore: cs,
+		node:    n,
+		store:   &storeRecorder{},
+		send:    func(_ []raftpb.Message) {},
+		storage: &storageRecorder{},
+		Cluster: cl,
 	}
 	s.start()
-	m := Member{ID: 1, RaftAttributes: RaftAttributes{PeerURLs: []string{"foo"}}}
-	s.AddMember(context.TODO(), m)
+	m := Member{ID: 1234, RaftAttributes: RaftAttributes{PeerURLs: []string{"foo"}}}
+	err := s.AddMember(context.TODO(), m)
 	gaction := n.Action()
 	s.Stop()
 
+	if err != nil {
+		t.Fatalf("AddMember error: %v", err)
+	}
 	wactions := []action{action{name: "ProposeConfChange:ConfChangeAddNode"}, action{name: "ApplyConfChange:ConfChangeAddNode"}}
 	if !reflect.DeepEqual(gaction, wactions) {
 		t.Errorf("action = %v, want %v", gaction, wactions)
 	}
-	wcsactions := []action{{name: "Add", params: []interface{}{m}}}
-	if g := cs.Action(); !reflect.DeepEqual(g, wcsactions) {
-		t.Errorf("csaction = %v, want %v", g, wcsactions)
+	if cl.Member(1234) == nil {
+		t.Errorf("member with id 1234 is not added")
 	}
 }
 
 // TestRemoveMember tests RemoveMember can propose and perform node removal.
 func TestRemoveMember(t *testing.T) {
 	n := newNodeConfChangeCommitterRecorder()
-	cs := &clusterStoreRecorder{}
-	s := &EtcdServer{
-		node:         n,
-		store:        &storeRecorder{},
-		send:         func(_ []raftpb.Message) {},
-		storage:      &storageRecorder{},
-		ClusterStore: cs,
+	n.readyc <- raft.Ready{
+		SoftState: &raft.SoftState{
+			RaftState: raft.StateLeader,
+			Nodes:     []uint64{1234, 2345, 3456},
+		},
 	}
-	s.start()
-	id := uint64(1)
-	s.RemoveMember(context.TODO(), id)
-	gaction := n.Action()
-	s.Stop()
-
-	wactions := []action{action{name: "ProposeConfChange:ConfChangeRemoveNode"}, action{name: "ApplyConfChange:ConfChangeRemoveNode"}}
-	if !reflect.DeepEqual(gaction, wactions) {
-		t.Errorf("action = %v, want %v", gaction, wactions)
-	}
-	wcsactions := []action{{name: "Remove", params: []interface{}{id}}}
-	if g := cs.Action(); !reflect.DeepEqual(g, wcsactions) {
-		t.Errorf("csaction = %v, want %v", g, wcsactions)
-	}
-}
-
-// TestServerStopItself tests that if node sends out Ready with ShouldStop,
-// server will stop.
-func TestServerStopItself(t *testing.T) {
-	n := newReadyNode()
+	cl := newTestCluster([]Member{{ID: 1234}})
+	cl.SetStore(&storeRecorder{})
 	s := &EtcdServer{
 		node:    n,
 		store:   &storeRecorder{},
 		send:    func(_ []raftpb.Message) {},
 		storage: &storageRecorder{},
+		Cluster: cl,
 	}
 	s.start()
-	n.readyc <- raft.Ready{SoftState: &raft.SoftState{ShouldStop: true}}
+	err := s.RemoveMember(context.TODO(), 1234)
+	gaction := n.Action()
+	s.Stop()
 
-	select {
-	case <-s.done:
-	case <-time.After(time.Millisecond):
-		t.Errorf("did not receive from closed done channel as expected")
+	if err != nil {
+		t.Fatalf("RemoveMember error: %v", err)
+	}
+	wactions := []action{action{name: "ProposeConfChange:ConfChangeRemoveNode"}, action{name: "ApplyConfChange:ConfChangeRemoveNode"}}
+	if !reflect.DeepEqual(gaction, wactions) {
+		t.Errorf("action = %v, want %v", gaction, wactions)
+	}
+	if cl.Member(1234) != nil {
+		t.Errorf("member with id 1234 is not removed")
 	}
 }
+
+// TODO: test server could stop itself when being removed
 
 // TODO: test wait trigger correctness in multi-server case
 
@@ -873,6 +1001,7 @@ func TestPublish(t *testing.T) {
 	srv := &EtcdServer{
 		id:         1,
 		attributes: Attributes{Name: "node1", ClientURLs: []string{"http://a", "http://b"}},
+		Cluster:    &Cluster{},
 		node:       n,
 		w:          w,
 	}
@@ -890,8 +1019,8 @@ func TestPublish(t *testing.T) {
 		t.Errorf("method = %s, want PUT", r.Method)
 	}
 	wm := Member{ID: 1, Attributes: Attributes{Name: "node1", ClientURLs: []string{"http://a", "http://b"}}}
-	if r.Path != wm.storeKey()+attributesSuffix {
-		t.Errorf("path = %s, want %s", r.Path, wm.storeKey()+attributesSuffix)
+	if w := path.Join(memberStoreKey(wm.ID), attributesSuffix); r.Path != w {
+		t.Errorf("path = %s, want %s", r.Path, w)
 	}
 	var gattr Attributes
 	if err := json.Unmarshal([]byte(r.Val), &gattr); err != nil {
@@ -905,10 +1034,13 @@ func TestPublish(t *testing.T) {
 // TestPublishStopped tests that publish will be stopped if server is stopped.
 func TestPublishStopped(t *testing.T) {
 	srv := &EtcdServer{
-		node: &nodeRecorder{},
-		w:    &waitRecorder{},
-		done: make(chan struct{}),
+		node:    &nodeRecorder{},
+		Cluster: &Cluster{},
+		w:       &waitRecorder{},
+		done:    make(chan struct{}),
+		stopped: make(chan struct{}),
 	}
+	close(srv.stopped)
 	srv.Stop()
 	srv.publish(time.Hour)
 }
@@ -926,8 +1058,8 @@ func TestPublishRetry(t *testing.T) {
 
 	action := n.Action()
 	// multiple Proposes
-	if len(action) < 2 {
-		t.Errorf("len(action) = %d, want >= 2", action)
+	if n := len(action); n < 2 {
+		t.Errorf("len(action) = %d, want >= 2", n)
 	}
 }
 
@@ -1055,8 +1187,7 @@ func (s *storeRecorder) Recovery(b []byte) error {
 	s.record(action{name: "Recovery"})
 	return nil
 }
-func (s *storeRecorder) TotalTransactions() uint64 { return 0 }
-func (s *storeRecorder) JsonStats() []byte         { return nil }
+func (s *storeRecorder) JsonStats() []byte { return nil }
 func (s *storeRecorder) DeleteExpiredKeys(cutoff time.Time) {
 	s.record(action{
 		name:   "DeleteExpiredKeys",
@@ -1105,18 +1236,19 @@ type storageRecorder struct {
 	recorder
 }
 
-func (p *storageRecorder) Save(st raftpb.HardState, ents []raftpb.Entry) {
+func (p *storageRecorder) Save(st raftpb.HardState, ents []raftpb.Entry) error {
 	p.record(action{name: "Save"})
+	return nil
 }
 func (p *storageRecorder) Cut() error {
 	p.record(action{name: "Cut"})
 	return nil
 }
-func (p *storageRecorder) SaveSnap(st raftpb.Snapshot) {
-	if raft.IsEmptySnap(st) {
-		return
+func (p *storageRecorder) SaveSnap(st raftpb.Snapshot) error {
+	if !raft.IsEmptySnap(st) {
+		p.record(action{name: "SaveSnap"})
 	}
-	p.record(action{name: "SaveSnap"})
+	return nil
 }
 
 type readyNode struct {
@@ -1164,7 +1296,7 @@ func (n *nodeRecorder) Step(ctx context.Context, msg raftpb.Message) error {
 }
 func (n *nodeRecorder) Ready() <-chan raft.Ready { return nil }
 func (n *nodeRecorder) ApplyConfChange(conf raftpb.ConfChange) {
-	n.record(action{name: "ApplyConfChange"})
+	n.record(action{name: "ApplyConfChange", params: []interface{}{conf}})
 }
 func (n *nodeRecorder) Stop() {
 	n.record(action{name: "Stop"})
@@ -1210,7 +1342,6 @@ type nodeConfChangeCommitterRecorder struct {
 
 func newNodeConfChangeCommitterRecorder() *nodeConfChangeCommitterRecorder {
 	readyc := make(chan raft.Ready, 1)
-	readyc <- raft.Ready{SoftState: &raft.SoftState{RaftState: raft.StateLeader}}
 	return &nodeConfChangeCommitterRecorder{readyc: readyc}
 }
 func (n *nodeConfChangeCommitterRecorder) ProposeConfChange(ctx context.Context, conf raftpb.ConfChange) error {
@@ -1247,16 +1378,26 @@ func (cs *clusterStoreRecorder) Add(m Member) {
 }
 func (cs *clusterStoreRecorder) Get() Cluster {
 	cs.record(action{name: "Get"})
-	return nil
+	return Cluster{}
 }
 func (cs *clusterStoreRecorder) Remove(id uint64) {
 	cs.record(action{name: "Remove", params: []interface{}{id}})
 }
+func (cs *clusterStoreRecorder) IsRemoved(id uint64) bool { return false }
+
+type removedClusterStore struct {
+	removed map[uint64]bool
+}
+
+func (cs *removedClusterStore) Add(m Member)             {}
+func (cs *removedClusterStore) Get() Cluster             { return Cluster{} }
+func (cs *removedClusterStore) Remove(id uint64)         {}
+func (cs *removedClusterStore) IsRemoved(id uint64) bool { return cs.removed[id] }
 
 func mustMakePeerSlice(t *testing.T, ids ...uint64) []raft.Peer {
 	peers := make([]raft.Peer, len(ids))
 	for i, id := range ids {
-		m := Member{ID: id}
+		m := Member{ID: types.ID(id)}
 		b, err := json.Marshal(m)
 		if err != nil {
 			t.Fatal(err)

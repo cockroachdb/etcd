@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package etcdserver
 
 import (
@@ -6,6 +22,7 @@ import (
 	"path"
 
 	"github.com/coreos/etcd/pkg/types"
+	"github.com/coreos/etcd/raft"
 )
 
 // ServerConfig holds the configuration of etcd as taken from the command line or discovery.
@@ -20,21 +37,28 @@ type ServerConfig struct {
 	Transport    *http.Transport
 }
 
-// Verify sanity-checks the config struct and returns an error for things that
-// should never happen.
-func (c *ServerConfig) Verify() error {
+// VerifyBootstrapConfig sanity-checks the initial config and returns an error
+// for things that should never happen.
+func (c *ServerConfig) VerifyBootstrapConfig() error {
+	m := c.Cluster.MemberByName(c.Name)
 	// Make sure the cluster at least contains the local server.
-	m := c.Cluster.FindName(c.Name)
 	if m == nil {
-		return fmt.Errorf("could not find name %v in cluster", c.Name)
+		return fmt.Errorf("couldn't find local name %s in the initial cluster configuration", c.Name)
+	}
+	if uint64(m.ID) == raft.None {
+		return fmt.Errorf("cannot use %x as member id", raft.None)
+	}
+
+	if c.DiscoveryURL == "" && c.ClusterState != ClusterStateValueNew {
+		return fmt.Errorf("initial cluster state unset and no wal or discovery URL found")
 	}
 
 	// No identical IPs in the cluster peer list
 	urlMap := make(map[string]bool)
-	for _, m := range *c.Cluster {
+	for _, m := range c.Cluster.Members() {
 		for _, url := range m.PeerURLs {
 			if urlMap[url] {
-				return fmt.Errorf("duplicate url %v in server config", url)
+				return fmt.Errorf("duplicate url %v in cluster config", url)
 			}
 			urlMap[url] = true
 		}
@@ -46,13 +70,6 @@ func (c *ServerConfig) WALDir() string { return path.Join(c.DataDir, "wal") }
 
 func (c *ServerConfig) SnapDir() string { return path.Join(c.DataDir, "snap") }
 
-func (c *ServerConfig) ID() uint64 { return c.Cluster.FindName(c.Name).ID }
-
 func (c *ServerConfig) ShouldDiscover() bool {
 	return c.DiscoveryURL != ""
-}
-
-// IsBootstrap returns true if a bootstrap method is provided.
-func (c *ServerConfig) IsBootstrap() bool {
-	return c.DiscoveryURL != "" || c.ClusterState == ClusterStateValueNew
 }

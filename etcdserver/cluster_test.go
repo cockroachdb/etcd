@@ -1,153 +1,31 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package etcdserver
 
 import (
+	"path"
 	"reflect"
 	"testing"
+
+	"github.com/coreos/etcd/pkg/types"
+	"github.com/coreos/etcd/store"
 )
 
-func TestClusterAddSlice(t *testing.T) {
-	tests := []struct {
-		mems []Member
-
-		want *Cluster
-	}{
-		{
-			[]Member{},
-
-			&Cluster{},
-		},
-		{
-			[]Member{
-				newTestMember(1, []string{"foo", "bar"}, "", nil),
-				newTestMember(2, []string{"baz"}, "", nil),
-			},
-
-			&Cluster{
-				1: newTestMemberp(1, []string{"foo", "bar"}, "", nil),
-				2: newTestMemberp(2, []string{"baz"}, "", nil),
-			},
-		},
-	}
-	for i, tt := range tests {
-		c := &Cluster{}
-		if err := c.AddSlice(tt.mems); err != nil {
-			t.Errorf("#%d: err=%#v, want nil", i, err)
-			continue
-		}
-		if !reflect.DeepEqual(c, tt.want) {
-			t.Errorf("#%d: c=%#v, want %#v", i, c, tt.want)
-		}
-	}
-}
-
-func TestClusterAddSliceBad(t *testing.T) {
-	c := Cluster{
-		1: newTestMemberp(1, nil, "", nil),
-	}
-	if err := c.AddSlice([]Member{newTestMember(1, nil, "", nil)}); err == nil {
-		t.Error("want err, but got nil")
-	}
-}
-
-func TestClusterPick(t *testing.T) {
-	cs := Cluster{
-		1: newTestMemberp(1, []string{"abc", "def", "ghi", "jkl", "mno", "pqr", "stu"}, "", nil),
-		2: newTestMemberp(2, []string{"xyz"}, "", nil),
-		3: newTestMemberp(3, []string{}, "", nil),
-	}
-	ids := map[string]bool{
-		"abc": true,
-		"def": true,
-		"ghi": true,
-		"jkl": true,
-		"mno": true,
-		"pqr": true,
-		"stu": true,
-	}
-	for i := 0; i < 1000; i++ {
-		a := cs.Pick(1)
-		if !ids[a] {
-			t.Errorf("returned ID %q not in expected range!", a)
-			break
-		}
-	}
-	if b := cs.Pick(2); b != "xyz" {
-		t.Errorf("id=%q, want %q", b, "xyz")
-	}
-	if c := cs.Pick(3); c != "" {
-		t.Errorf("id=%q, want %q", c, "")
-	}
-	if d := cs.Pick(4); d != "" {
-		t.Errorf("id=%q, want %q", d, "")
-	}
-}
-
-func TestClusterFind(t *testing.T) {
-	tests := []struct {
-		id    uint64
-		name  string
-		mems  []Member
-		match bool
-	}{
-		{
-			1,
-			"node1",
-			[]Member{newTestMember(1, nil, "node1", nil)},
-			true,
-		},
-		{
-			2,
-			"foobar",
-			[]Member{},
-			false,
-		},
-		{
-			2,
-			"node2",
-			[]Member{newTestMember(1, nil, "node1", nil), newTestMember(2, nil, "node2", nil)},
-			true,
-		},
-		{
-			3,
-			"node3",
-			[]Member{newTestMember(1, nil, "node1", nil), newTestMember(2, nil, "node2", nil)},
-			false,
-		},
-	}
-	for i, tt := range tests {
-		c := Cluster{}
-		c.AddSlice(tt.mems)
-
-		m := c.FindName(tt.name)
-		if m == nil && !tt.match {
-			continue
-		}
-		if m == nil && tt.match {
-			t.Errorf("#%d: expected match got empty", i)
-		}
-		if m.Name != tt.name && tt.match {
-			t.Errorf("#%d: got = %v, want %v", i, m.Name, tt.name)
-		}
-	}
-
-	for i, tt := range tests {
-		c := Cluster{}
-		c.AddSlice(tt.mems)
-
-		m := c.FindID(tt.id)
-		if m == nil && !tt.match {
-			continue
-		}
-		if m == nil && tt.match {
-			t.Errorf("#%d: expected match got empty", i)
-		}
-		if m.ID != tt.id && tt.match {
-			t.Errorf("#%d: got = %v, want %v", i, m.Name, tt.id)
-		}
-	}
-}
-
-func TestClusterSet(t *testing.T) {
+func TestClusterFromString(t *testing.T) {
 	tests := []struct {
 		f    string
 		mems []Member
@@ -155,71 +33,143 @@ func TestClusterSet(t *testing.T) {
 		{
 			"mem1=http://10.0.0.1:2379,mem1=http://128.193.4.20:2379,mem2=http://10.0.0.2:2379,default=http://127.0.0.1:2379",
 			[]Member{
-				newTestMember(3736794188555456841, []string{"http://10.0.0.1:2379", "http://128.193.4.20:2379"}, "mem1", nil),
-				newTestMember(5674507346857578431, []string{"http://10.0.0.2:2379"}, "mem2", nil),
-				newTestMember(2676999861503984872, []string{"http://127.0.0.1:2379"}, "default", nil),
+				newTestMember(4322322643958477905, []string{"http://10.0.0.1:2379", "http://128.193.4.20:2379"}, "mem1", nil),
+				newTestMember(3141198903430435750, []string{"http://10.0.0.2:2379"}, "mem2", nil),
+				newTestMember(12762790032478827328, []string{"http://127.0.0.1:2379"}, "default", nil),
 			},
 		},
 	}
 	for i, tt := range tests {
-		c := Cluster{}
-		if err := c.AddSlice(tt.mems); err != nil {
-			t.Error(err)
+		c, err := NewClusterFromString("abc", tt.f)
+		if err != nil {
+			t.Fatalf("#%d: unexpected new error: %v", i, err)
 		}
-
-		g := Cluster{}
-		g.Set(tt.f)
-
-		if g.String() != c.String() {
-			t.Errorf("#%d: set = %v, want %v", i, g, c)
+		if c.token != "abc" {
+			t.Errorf("#%d: token = %v, want abc", i, c.token)
+		}
+		wc := newTestCluster(tt.mems)
+		if !reflect.DeepEqual(c.members, wc.members) {
+			t.Errorf("#%d: members = %+v, want %+v", i, c.members, wc.members)
 		}
 	}
 }
 
-func TestClusterSetBad(t *testing.T) {
+func TestClusterFromStringBad(t *testing.T) {
 	tests := []string{
 		// invalid URL
 		"%^",
 		// no URL defined for member
 		"mem1=,mem2=http://128.193.4.20:2379,mem3=http://10.0.0.2:2379",
 		"mem1,mem2=http://128.193.4.20:2379,mem3=http://10.0.0.2:2379",
+		// bad URL for member
+		"default=http://localhost/",
 		// TODO(philips): anyone know of a 64 bit sha1 hash collision
 		// "06b2f82fd81b2c20=http://128.193.4.20:2379,02c60cb75083ceef=http://128.193.4.20:2379",
+		// the same url for two members
+		"mem1=http://128.193.4.20:2379,mem2=http://128.193.4.20:2379",
 	}
 	for i, tt := range tests {
-		g := Cluster{}
-		if err := g.Set(tt); err == nil {
-			t.Errorf("#%d: set = %v, want err", i, tt)
+		if _, err := NewClusterFromString("abc", tt); err == nil {
+			t.Errorf("#%d: unexpected successful new, want err", i)
 		}
 	}
 }
 
-func TestClusterIDs(t *testing.T) {
-	cs := Cluster{}
-	cs.AddSlice([]Member{
+func TestClusterFromStore(t *testing.T) {
+	tests := []struct {
+		mems []Member
+	}{
+		{
+			[]Member{newTestMember(1, nil, "node1", nil)},
+		},
+		{
+			[]Member{},
+		},
+		{
+			[]Member{
+				newTestMember(1, nil, "node1", nil),
+				newTestMember(2, nil, "node2", nil),
+			},
+		},
+	}
+	for i, tt := range tests {
+		st := store.New()
+		hc := newTestCluster(nil)
+		hc.SetStore(st)
+		for _, m := range tt.mems {
+			hc.AddMember(&m)
+		}
+		c := NewClusterFromStore("abc", st)
+		if c.token != "abc" {
+			t.Errorf("#%d: token = %v, want %v", i, c.token, "abc")
+		}
+		wc := newTestCluster(tt.mems)
+		if !reflect.DeepEqual(c.members, wc.members) {
+			t.Errorf("#%d: members = %v, want %v", i, c.members, wc.members)
+		}
+	}
+}
+
+func TestClusterMember(t *testing.T) {
+	membs := []Member{
+		newTestMember(1, nil, "node1", nil),
+		newTestMember(2, nil, "node2", nil),
+	}
+	tests := []struct {
+		id    types.ID
+		match bool
+	}{
+		{1, true},
+		{2, true},
+		{3, false},
+	}
+	for i, tt := range tests {
+		c := newTestCluster(membs)
+		m := c.Member(tt.id)
+		if g := m != nil; g != tt.match {
+			t.Errorf("#%d: find member = %v, want %v", i, g, tt.match)
+		}
+		if m != nil && m.ID != tt.id {
+			t.Errorf("#%d: id = %x, want %x", i, m.ID, tt.id)
+		}
+	}
+}
+
+func TestClusterMemberByName(t *testing.T) {
+	membs := []Member{
+		newTestMember(1, nil, "node1", nil),
+		newTestMember(2, nil, "node2", nil),
+	}
+	tests := []struct {
+		name  string
+		match bool
+	}{
+		{"node1", true},
+		{"node2", true},
+		{"node3", false},
+	}
+	for i, tt := range tests {
+		c := newTestCluster(membs)
+		m := c.MemberByName(tt.name)
+		if g := m != nil; g != tt.match {
+			t.Errorf("#%d: find member = %v, want %v", i, g, tt.match)
+		}
+		if m != nil && m.Name != tt.name {
+			t.Errorf("#%d: name = %v, want %v", i, m.Name, tt.name)
+		}
+	}
+}
+
+func TestClusterMemberIDs(t *testing.T) {
+	c := newTestCluster([]Member{
 		newTestMember(1, nil, "", nil),
 		newTestMember(4, nil, "", nil),
 		newTestMember(100, nil, "", nil),
 	})
-	w := []uint64{1, 4, 100}
-	g := cs.IDs()
+	w := []types.ID{1, 4, 100}
+	g := c.MemberIDs()
 	if !reflect.DeepEqual(w, g) {
-		t.Errorf("IDs=%+v, want %+v", g, w)
-	}
-}
-
-func TestClusterAddBad(t *testing.T) {
-	// Should not be possible to add the same ID multiple times
-	mems := []Member{
-		newTestMember(1, nil, "mem1", nil),
-		newTestMember(1, nil, "mem2", nil),
-	}
-	c := &Cluster{}
-	c.Add(newTestMember(1, nil, "mem1", nil))
-	for i, m := range mems {
-		if err := c.Add(m); err == nil {
-			t.Errorf("#%d: set = %v, want err", i, err)
-		}
+		t.Errorf("IDs = %+v, want %+v", g, w)
 	}
 }
 
@@ -270,11 +220,7 @@ func TestClusterPeerURLs(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		c := Cluster{}
-		if err := c.AddSlice(tt.mems); err != nil {
-			t.Errorf("AddSlice error: %v", err)
-			continue
-		}
+		c := newTestCluster(tt.mems)
 		urls := c.PeerURLs()
 		if !reflect.DeepEqual(urls, tt.wurls) {
 			t.Errorf("#%d: PeerURLs = %v, want %v", i, urls, tt.wurls)
@@ -329,14 +275,281 @@ func TestClusterClientURLs(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		c := Cluster{}
-		if err := c.AddSlice(tt.mems); err != nil {
-			t.Errorf("AddSlice error: %v", err)
-			continue
-		}
+		c := newTestCluster(tt.mems)
 		urls := c.ClientURLs()
 		if !reflect.DeepEqual(urls, tt.wurls) {
 			t.Errorf("#%d: ClientURLs = %v, want %v", i, urls, tt.wurls)
 		}
 	}
+}
+
+func TestClusterValidateAndAssignIDsBad(t *testing.T) {
+	tests := []struct {
+		clmembs []Member
+		membs   []*Member
+	}{
+		{
+			// unmatched length
+			[]Member{
+				newTestMember(1, []string{"http://127.0.0.1:2379"}, "", nil),
+			},
+			[]*Member{},
+		},
+		{
+			// unmatched peer urls
+			[]Member{
+				newTestMember(1, []string{"http://127.0.0.1:2379"}, "", nil),
+			},
+			[]*Member{
+				newTestMemberp(1, []string{"http://127.0.0.1:4001"}, "", nil),
+			},
+		},
+		{
+			// unmatched peer urls
+			[]Member{
+				newTestMember(1, []string{"http://127.0.0.1:2379"}, "", nil),
+				newTestMember(2, []string{"http://127.0.0.2:2379"}, "", nil),
+			},
+			[]*Member{
+				newTestMemberp(1, []string{"http://127.0.0.1:2379"}, "", nil),
+				newTestMemberp(2, []string{"http://127.0.0.2:4001"}, "", nil),
+			},
+		},
+	}
+	for i, tt := range tests {
+		cl := newTestCluster(tt.clmembs)
+		if err := cl.ValidateAndAssignIDs(tt.membs); err == nil {
+			t.Errorf("#%d: unexpected update success", i)
+		}
+	}
+}
+
+func TestClusterValidateAndAssignIDs(t *testing.T) {
+	tests := []struct {
+		clmembs []Member
+		membs   []*Member
+		wids    []types.ID
+	}{
+		{
+			[]Member{
+				newTestMember(1, []string{"http://127.0.0.1:2379"}, "", nil),
+				newTestMember(2, []string{"http://127.0.0.2:2379"}, "", nil),
+			},
+			[]*Member{
+				newTestMemberp(3, []string{"http://127.0.0.1:2379"}, "", nil),
+				newTestMemberp(4, []string{"http://127.0.0.2:2379"}, "", nil),
+			},
+			[]types.ID{3, 4},
+		},
+	}
+	for i, tt := range tests {
+		cl := newTestCluster(tt.clmembs)
+		if err := cl.ValidateAndAssignIDs(tt.membs); err != nil {
+			t.Errorf("#%d: unexpect update error: %v", i, err)
+		}
+		if !reflect.DeepEqual(cl.MemberIDs(), tt.wids) {
+			t.Errorf("#%d: ids = %v, want %v", i, cl.MemberIDs(), tt.wids)
+		}
+	}
+}
+
+func TestClusterGenID(t *testing.T) {
+	cs := newTestCluster([]Member{
+		newTestMember(1, nil, "", nil),
+		newTestMember(2, nil, "", nil),
+	})
+
+	cs.genID()
+	if cs.ID() == 0 {
+		t.Fatalf("cluster.ID = %v, want not 0", cs.ID())
+	}
+	previd := cs.ID()
+
+	cs.SetStore(&storeRecorder{})
+	cs.AddMember(newTestMemberp(3, nil, "", nil))
+	cs.genID()
+	if cs.ID() == previd {
+		t.Fatalf("cluster.ID = %v, want not %v", cs.ID(), previd)
+	}
+}
+
+func TestNodeToMemberBad(t *testing.T) {
+	tests := []*store.NodeExtern{
+		{Key: "/1234", Nodes: []*store.NodeExtern{
+			{Key: "/1234/strange"},
+		}},
+		{Key: "/1234", Nodes: []*store.NodeExtern{
+			{Key: "/1234/dynamic", Value: stringp("garbage")},
+		}},
+		{Key: "/1234", Nodes: []*store.NodeExtern{
+			{Key: "/1234/dynamic", Value: stringp(`{"peerURLs":null}`)},
+		}},
+		{Key: "/1234", Nodes: []*store.NodeExtern{
+			{Key: "/1234/dynamic", Value: stringp(`{"peerURLs":null}`)},
+			{Key: "/1234/strange"},
+		}},
+		{Key: "/1234", Nodes: []*store.NodeExtern{
+			{Key: "/1234/dynamic", Value: stringp(`{"peerURLs":null}`)},
+			{Key: "/1234/static", Value: stringp("garbage")},
+		}},
+		{Key: "/1234", Nodes: []*store.NodeExtern{
+			{Key: "/1234/dynamic", Value: stringp(`{"peerURLs":null}`)},
+			{Key: "/1234/static", Value: stringp(`{"name":"node1","clientURLs":null}`)},
+			{Key: "/1234/strange"},
+		}},
+	}
+	for i, tt := range tests {
+		if _, err := nodeToMember(tt); err == nil {
+			t.Errorf("#%d: unexpected nil error", i)
+		}
+	}
+}
+
+func TestClusterAddMember(t *testing.T) {
+	st := &storeRecorder{}
+	c := newTestCluster(nil)
+	c.SetStore(st)
+	c.AddMember(newTestMemberp(1, nil, "node1", nil))
+
+	wactions := []action{
+		{
+			name: "Create",
+			params: []interface{}{
+				path.Join(storeMembersPrefix, "1", "raftAttributes"),
+				false,
+				`{"peerURLs":null}`,
+				false,
+				store.Permanent,
+			},
+		},
+		{
+			name: "Create",
+			params: []interface{}{
+				path.Join(storeMembersPrefix, "1", "attributes"),
+				false,
+				`{"name":"node1"}`,
+				false,
+				store.Permanent,
+			},
+		},
+	}
+	if g := st.Action(); !reflect.DeepEqual(g, wactions) {
+		t.Errorf("actions = %v, want %v", g, wactions)
+	}
+}
+
+func TestClusterMembers(t *testing.T) {
+	cls := &Cluster{
+		members: map[types.ID]*Member{
+			1:   &Member{ID: 1},
+			20:  &Member{ID: 20},
+			100: &Member{ID: 100},
+			5:   &Member{ID: 5},
+			50:  &Member{ID: 50},
+		},
+	}
+	w := []*Member{
+		&Member{ID: 1},
+		&Member{ID: 5},
+		&Member{ID: 20},
+		&Member{ID: 50},
+		&Member{ID: 100},
+	}
+	if g := cls.Members(); !reflect.DeepEqual(g, w) {
+		t.Fatalf("Members()=%#v, want %#v", g, w)
+	}
+}
+
+func TestClusterString(t *testing.T) {
+	cls := &Cluster{
+		members: map[types.ID]*Member{
+			1: newTestMemberp(
+				1,
+				[]string{"http://1.1.1.1:1111", "http://0.0.0.0:0000"},
+				"abc",
+				nil,
+			),
+			2: newTestMemberp(
+				2,
+				[]string{"http://2.2.2.2:2222"},
+				"def",
+				nil,
+			),
+			3: newTestMemberp(
+				3,
+				[]string{"http://3.3.3.3:1234", "http://127.0.0.1:7001"},
+				"ghi",
+				nil,
+			),
+			// no PeerURLs = not included
+			4: newTestMemberp(
+				4,
+				[]string{},
+				"four",
+				nil,
+			),
+			5: newTestMemberp(
+				5,
+				nil,
+				"five",
+				nil,
+			),
+		},
+	}
+	w := "abc=http://0.0.0.0:0000,abc=http://1.1.1.1:1111,def=http://2.2.2.2:2222,ghi=http://127.0.0.1:7001,ghi=http://3.3.3.3:1234"
+	if g := cls.String(); g != w {
+		t.Fatalf("Cluster.String():\ngot  %#v\nwant %#v", g, w)
+	}
+
+}
+
+func TestClusterRemoveMember(t *testing.T) {
+	st := &storeRecorder{}
+	c := newTestCluster(nil)
+	c.SetStore(st)
+	c.RemoveMember(1)
+
+	wactions := []action{
+		{name: "Delete", params: []interface{}{memberStoreKey(1), true, true}},
+		{name: "Create", params: []interface{}{removedMemberStoreKey(1), false, "", false, store.Permanent}},
+	}
+	if !reflect.DeepEqual(st.Action(), wactions) {
+		t.Errorf("actions = %v, want %v", st.Action(), wactions)
+	}
+}
+
+func TestNodeToMember(t *testing.T) {
+	n := &store.NodeExtern{Key: "/1234", Nodes: []*store.NodeExtern{
+		{Key: "/1234/attributes", Value: stringp(`{"name":"node1","clientURLs":null}`)},
+		{Key: "/1234/raftAttributes", Value: stringp(`{"peerURLs":null}`)},
+	}}
+	wm := &Member{ID: 0x1234, RaftAttributes: RaftAttributes{}, Attributes: Attributes{Name: "node1"}}
+	m, err := nodeToMember(n)
+	if err != nil {
+		t.Fatalf("unexpected nodeToMember error: %v", err)
+	}
+	if !reflect.DeepEqual(m, wm) {
+		t.Errorf("member = %+v, want %+v", m, wm)
+	}
+}
+
+func newTestCluster(membs []Member) *Cluster {
+	c := &Cluster{members: make(map[types.ID]*Member), removed: make(map[types.ID]bool)}
+	for i, m := range membs {
+		c.members[m.ID] = &membs[i]
+	}
+	return c
+}
+
+func newTestMember(id uint64, peerURLs []string, name string, clientURLs []string) Member {
+	return Member{
+		ID:             types.ID(id),
+		RaftAttributes: RaftAttributes{PeerURLs: peerURLs},
+		Attributes:     Attributes{Name: name, ClientURLs: clientURLs},
+	}
+}
+
+func newTestMemberp(id uint64, peerURLs []string, name string, clientURLs []string) *Member {
+	m := newTestMember(id, peerURLs, name, clientURLs)
+	return &m
 }

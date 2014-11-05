@@ -1,17 +1,17 @@
 /*
-Copyright 2013 CoreOS Inc.
+   Copyright 2014 CoreOS, Inc.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-     http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 package error
@@ -61,6 +61,16 @@ var errors = map[int]string{
 
 	// client related errors
 	EcodeClientInternal: "Client Internal Error",
+}
+
+var errorStatus = map[int]int{
+	EcodeKeyNotFound:  http.StatusNotFound,
+	EcodeNotFile:      http.StatusForbidden,
+	EcodeDirNotEmpty:  http.StatusForbidden,
+	EcodeTestFailed:   http.StatusPreconditionFailed,
+	EcodeNodeExist:    http.StatusPreconditionFailed,
+	EcodeRaftInternal: http.StatusInternalServerError,
+	EcodeLeaderElect:  http.StatusInternalServerError,
 }
 
 const (
@@ -133,22 +143,17 @@ func (e Error) toJsonString() string {
 	return string(b)
 }
 
-func (e Error) Write(w http.ResponseWriter) {
-	w.Header().Add("X-Etcd-Index", fmt.Sprint(e.Index))
-	// 3xx is raft internal error
-	status := http.StatusBadRequest
-	switch e.ErrorCode {
-	case EcodeKeyNotFound:
-		status = http.StatusNotFound
-	case EcodeNotFile, EcodeDirNotEmpty:
-		status = http.StatusForbidden
-	case EcodeTestFailed, EcodeNodeExist:
-		status = http.StatusPreconditionFailed
-	default:
-		if e.ErrorCode/100 == 3 {
-			status = http.StatusInternalServerError
-		}
+func (e Error) statusCode() int {
+	status, ok := errorStatus[e.ErrorCode]
+	if !ok {
+		status = http.StatusBadRequest
 	}
-	w.WriteHeader(status)
+	return status
+}
+
+func (e Error) WriteTo(w http.ResponseWriter) {
+	w.Header().Add("X-Etcd-Index", fmt.Sprint(e.Index))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(e.statusCode())
 	fmt.Fprintln(w, e.toJsonString())
 }

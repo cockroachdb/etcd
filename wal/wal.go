@@ -1,17 +1,17 @@
 /*
-Copyright 2014 CoreOS Inc.
+   Copyright 2014 CoreOS, Inc.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
- http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 package wal
@@ -97,6 +97,7 @@ func Create(dirpath string, metadata []byte) (*WAL, error) {
 	if err := w.encoder.encode(&walpb.Record{Type: metadataType, Data: metadata}); err != nil {
 		return nil, err
 	}
+	w.Sync()
 	return w, nil
 }
 
@@ -273,13 +274,17 @@ func (w *WAL) SaveState(s *raftpb.HardState) error {
 	return w.encoder.encode(rec)
 }
 
-func (w *WAL) Save(st raftpb.HardState, ents []raftpb.Entry) {
+func (w *WAL) Save(st raftpb.HardState, ents []raftpb.Entry) error {
 	// TODO(xiangli): no more reference operator
-	w.SaveState(&st)
-	for i := range ents {
-		w.SaveEntry(&ents[i])
+	if err := w.SaveState(&st); err != nil {
+		return err
 	}
-	w.Sync()
+	for i := range ents {
+		if err := w.SaveEntry(&ents[i]); err != nil {
+			return err
+		}
+	}
+	return w.Sync()
 }
 
 func (w *WAL) saveCrc(prevCrc uint32) error {

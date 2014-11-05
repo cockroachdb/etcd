@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package raft
 
 import (
@@ -6,7 +22,7 @@ import (
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
-	"github.com/coreos/etcd/pkg"
+	"github.com/coreos/etcd/pkg/testutil"
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
@@ -105,7 +121,7 @@ func TestBlockProposal(t *testing.T) {
 		errc <- n.Propose(context.TODO(), []byte("somedata"))
 	}()
 
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case err := <-errc:
 		t.Errorf("err = %v, want blocking", err)
@@ -113,7 +129,7 @@ func TestBlockProposal(t *testing.T) {
 	}
 
 	n.Campaign(context.TODO())
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case err := <-errc:
 		if err != nil {
@@ -174,7 +190,6 @@ func TestNode(t *testing.T) {
 			CommittedEntries: []raftpb.Entry{{Term: 1, Index: 3, Data: []byte("foo")}},
 		},
 	}
-
 	n := StartNode(1, []Peer{{ID: 1}}, 10, 1)
 	n.ApplyConfChange(cc)
 	n.Campaign(ctx)
@@ -232,14 +247,13 @@ func TestNodeCompact(t *testing.T) {
 	n.Propose(ctx, []byte("foo"))
 
 	w := raftpb.Snapshot{
-		Term:         1,
-		Index:        2, // one nop + one proposal
-		Data:         []byte("a snapshot"),
-		Nodes:        []uint64{1},
-		RemovedNodes: []uint64{},
+		Term:  1,
+		Index: 2, // one nop + one proposal
+		Data:  []byte("a snapshot"),
+		Nodes: []uint64{1},
 	}
 
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case <-n.Ready():
 	default:
@@ -247,7 +261,7 @@ func TestNodeCompact(t *testing.T) {
 	}
 
 	n.Compact(w.Index, w.Nodes, w.Data)
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case rd := <-n.Ready():
 		if !reflect.DeepEqual(rd.Snapshot, w) {
@@ -256,7 +270,7 @@ func TestNodeCompact(t *testing.T) {
 	default:
 		t.Fatalf("unexpected compact failure: unable to create a snapshot")
 	}
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	// TODO: this test the run updates the snapi correctly... should be tested
 	// separately with other kinds of updates
 	select {
@@ -279,7 +293,6 @@ func TestSoftStateEqual(t *testing.T) {
 		{&SoftState{}, true},
 		{&SoftState{Lead: 1}, false},
 		{&SoftState{RaftState: StateLeader}, false},
-		{&SoftState{ShouldStop: true}, false},
 		{&SoftState{Nodes: []uint64{1, 2}}, false},
 	}
 	for i, tt := range tests {

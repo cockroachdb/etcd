@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package raft
 
 import (
@@ -34,6 +50,10 @@ func (st StateType) String() string {
 	return stmap[uint64(st)]
 }
 
+func (st StateType) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf("%q", st.String())), nil
+}
+
 type progress struct {
 	match, next uint64
 }
@@ -46,9 +66,8 @@ func (pr *progress) update(n uint64) {
 // maybeDecrTo returns false if the given to index comes from an out of order message.
 // Otherwise it decreases the progress next index and returns true.
 func (pr *progress) maybeDecrTo(to uint64) bool {
-	// the rejection must be stale if the
-	// progress has matched with follower
-	// or "to" does not match next - 1
+	// the rejection must be stale if the progress has matched with
+	// follower or "to" does not match next - 1
 	if pr.match != 0 || pr.next-1 != to {
 		return false
 	}
@@ -92,12 +111,10 @@ type raft struct {
 	// New configuration is ignored if there exists unapplied configuration.
 	pendingConf bool
 
-	// TODO: need GC and recovery from snapshot
-	removed map[uint64]bool
-
 	elapsed          int // number of ticks since the last msg
 	heartbeatTimeout int
 	electionTimeout  int
+	rand             *rand.Rand
 	tick             func()
 	step             stepFunc
 }
@@ -106,16 +123,15 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int) *raft {
 	if id == None {
 		panic("cannot use none id")
 	}
-	rand.Seed(int64(id))
 	r := &raft{
 		id:               id,
 		lead:             None,
 		raftLog:          newLog(),
 		prs:              make(map[uint64]*progress),
-		removed:          make(map[uint64]bool),
 		electionTimeout:  election,
 		heartbeatTimeout: heartbeat,
 	}
+	r.rand = rand.New(rand.NewSource(int64(id)))
 	for _, p := range peers {
 		r.prs[p] = &progress{}
 	}
@@ -125,10 +141,8 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int) *raft {
 
 func (r *raft) hasLeader() bool { return r.lead != None }
 
-func (r *raft) shouldStop() bool { return r.removed[r.id] }
-
 func (r *raft) softState() *SoftState {
-	return &SoftState{Lead: r.lead, RaftState: r.state, Nodes: r.nodes(), ShouldStop: r.shouldStop()}
+	return &SoftState{Lead: r.lead, RaftState: r.state, Nodes: r.nodes()}
 }
 
 func (r *raft) String() string {
@@ -159,7 +173,7 @@ func (r *raft) poll(id uint64, v bool) (granted int) {
 // send persists state to stable storage and then sends to its mailbox.
 func (r *raft) send(m pb.Message) {
 	m.From = r.id
-	// do not attach term to msgProp
+	// do not attach term to MsgProp
 	// proposals are a way to forward to the leader and
 	// should be treated as local message.
 	if m.Type != pb.MsgProp {
@@ -186,7 +200,7 @@ func (r *raft) sendAppend(to uint64) {
 	r.send(m)
 }
 
-// sendHeartbeat sends an empty msgApp
+// sendHeartbeat sends an empty MsgApp
 func (r *raft) sendHeartbeat(to uint64) {
 	m := pb.Message{
 		To:   to,
@@ -195,7 +209,8 @@ func (r *raft) sendHeartbeat(to uint64) {
 	r.send(m)
 }
 
-// bcastAppend sends RRPC, with entries to all peers that are not up-to-date according to r.mis.
+// bcastAppend sends RRPC, with entries to all peers that are not up-to-date
+// according to the progress recorded in r.prs.
 func (r *raft) bcastAppend() {
 	for i := range r.prs {
 		if i == r.id {
@@ -254,7 +269,7 @@ func (r *raft) appendEntry(e pb.Entry) {
 	r.maybeCommit()
 }
 
-// tickElection is ran by followers and candidates after r.electionTimeout.
+// tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
 	if !r.promotable() {
 		r.elapsed = 0
@@ -267,7 +282,7 @@ func (r *raft) tickElection() {
 	}
 }
 
-// tickHeartbeat is ran by leaders to send a msgBeat after r.heartbeatTimeout.
+// tickHeartbeat is run by leaders to send a MsgBeat after r.heartbeatTimeout.
 func (r *raft) tickHeartbeat() {
 	r.elapsed++
 	if r.elapsed > r.heartbeatTimeout {
@@ -318,13 +333,6 @@ func (r *raft) becomeLeader() {
 	r.appendEntry(pb.Entry{Data: nil})
 }
 
-func (r *raft) ReadMessages() []pb.Message {
-	msgs := r.msgs
-	r.msgs = make([]pb.Message, 0)
-
-	return msgs
-}
-
 func (r *raft) campaign() {
 	r.becomeCandidate()
 	if r.q() == r.poll(r.id, true) {
@@ -334,27 +342,13 @@ func (r *raft) campaign() {
 		if i == r.id {
 			continue
 		}
-		lasti := r.raftLog.lastIndex()
-		r.send(pb.Message{To: i, Type: pb.MsgVote, Index: lasti, LogTerm: r.raftLog.term(lasti)})
+		r.send(pb.Message{To: i, Type: pb.MsgVote, Index: r.raftLog.lastIndex(), LogTerm: r.raftLog.lastTerm()})
 	}
 }
 
 func (r *raft) Step(m pb.Message) error {
 	// TODO(bmizerany): this likely allocs - prevent that.
 	defer func() { r.Commit = r.raftLog.committed }()
-
-	if r.removed[m.From] {
-		if m.From != r.id {
-			r.send(pb.Message{To: m.From, Type: pb.MsgDenied})
-		}
-		// TODO: return an error?
-		return nil
-	}
-	if m.Type == pb.MsgDenied {
-		r.removed[r.id] = true
-		// TODO: return an error?
-		return nil
-	}
 
 	if m.Type == pb.MsgHup {
 		r.campaign()
@@ -378,8 +372,8 @@ func (r *raft) Step(m pb.Message) error {
 }
 
 func (r *raft) handleAppendEntries(m pb.Message) {
-	if r.raftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...) {
-		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()})
+	if mlastIndex, ok := r.raftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
+		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: mlastIndex})
 	} else {
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: m.Index, Reject: true})
 	}
@@ -393,6 +387,10 @@ func (r *raft) handleSnapshot(m pb.Message) {
 	}
 }
 
+func (r *raft) resetPendingConf() {
+	r.pendingConf = false
+}
+
 func (r *raft) addNode(id uint64) {
 	r.setProgress(id, 0, r.raftLog.lastIndex()+1)
 	r.pendingConf = false
@@ -401,7 +399,6 @@ func (r *raft) addNode(id uint64) {
 func (r *raft) removeNode(id uint64) {
 	r.delProgress(id)
 	r.pendingConf = false
-	r.removed[id] = true
 }
 
 type stepFunc func(r *raft, m pb.Message)
@@ -412,7 +409,7 @@ func stepLeader(r *raft, m pb.Message) {
 		r.bcastHeartbeat()
 	case pb.MsgProp:
 		if len(m.Entries) != 1 {
-			panic("unexpected length(entries) of a msgProp")
+			panic("unexpected length(entries) of a MsgProp")
 		}
 		e := m.Entries[0]
 		if e.Type == pb.EntryConfChange {
@@ -424,6 +421,9 @@ func stepLeader(r *raft, m pb.Message) {
 		r.appendEntry(e)
 		r.bcastAppend()
 	case pb.MsgAppResp:
+		if m.Index == 0 {
+			return
+		}
 		if m.Reject {
 			if r.prs[m.From].maybeDecrTo(m.Index) {
 				r.sendAppend(m.From)
@@ -493,10 +493,7 @@ func (r *raft) compact(index uint64, nodes []uint64, d []byte) {
 	if index > r.raftLog.applied {
 		panic(fmt.Sprintf("raft: compact index (%d) exceeds applied index (%d)", index, r.raftLog.applied))
 	}
-	// We do not get the removed nodes at the given index.
-	// We get the removed nodes at current index. So a state machine might
-	// have a newer verison of removed nodes after recovery. It is OK.
-	r.raftLog.snap(d, index, r.raftLog.term(index), nodes, r.removedNodes())
+	r.raftLog.snap(d, index, r.raftLog.term(index), nodes)
 	r.raftLog.compact(index)
 }
 
@@ -515,10 +512,6 @@ func (r *raft) restore(s pb.Snapshot) bool {
 		} else {
 			r.setProgress(n, 0, r.raftLog.lastIndex()+1)
 		}
-	}
-	r.removed = make(map[uint64]bool)
-	for _, n := range s.RemovedNodes {
-		r.removed[n] = true
 	}
 	return true
 }
@@ -539,14 +532,6 @@ func (r *raft) nodes() []uint64 {
 		nodes = append(nodes, k)
 	}
 	return nodes
-}
-
-func (r *raft) removedNodes() []uint64 {
-	removed := make([]uint64, 0, len(r.removed))
-	for k := range r.removed {
-		removed = append(removed, k)
-	}
-	return removed
 }
 
 func (r *raft) setProgress(id, match, next uint64) {
@@ -583,5 +568,5 @@ func (r *raft) isElectionTimeout() bool {
 	if d < 0 {
 		return false
 	}
-	return d > rand.Int()%r.electionTimeout
+	return d > r.rand.Int()%r.electionTimeout
 }

@@ -1,17 +1,17 @@
 /*
-Copyright 2014 CoreOS Inc.
+   Copyright 2014 CoreOS, Inc.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
- http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 package wal
@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/wal/walpb"
 )
 
 func TestNew(t *testing.T) {
@@ -34,14 +35,33 @@ func TestNew(t *testing.T) {
 	}
 	defer os.RemoveAll(p)
 
-	w, err := Create(p, nil)
+	w, err := Create(p, []byte("somedata"))
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
 	if g := path.Base(w.f.Name()); g != walName(0, 0) {
 		t.Errorf("name = %+v, want %+v", g, walName(0, 0))
 	}
-	w.Close()
+	defer w.Close()
+	gd, err := ioutil.ReadFile(w.f.Name())
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+
+	var wb bytes.Buffer
+	e := newEncoder(&wb, 0)
+	err = e.encode(&walpb.Record{Type: crcType, Crc: 0})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	err = e.encode(&walpb.Record{Type: metadataType, Data: []byte("somedata")})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	e.flush()
+	if !reflect.DeepEqual(gd, wb.Bytes()) {
+		t.Errorf("data = %v, want %v", gd, wb.Bytes())
+	}
 }
 
 func TestNewForInitedDir(t *testing.T) {

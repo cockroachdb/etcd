@@ -1,13 +1,25 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package raft
 
 import (
 	"fmt"
 
 	pb "github.com/coreos/etcd/raft/raftpb"
-)
-
-const (
-	defaultCompactThreshold = 10000
 )
 
 type raftLog struct {
@@ -17,27 +29,21 @@ type raftLog struct {
 	applied   uint64
 	offset    uint64
 	snapshot  pb.Snapshot
-
-	// want a compact after the number of entries exceeds the threshold
-	// TODO(xiangli) size might be a better criteria
-	compactThreshold uint64
 }
 
 func newLog() *raftLog {
 	return &raftLog{
-		ents:             make([]pb.Entry, 1),
-		unstable:         0,
-		committed:        0,
-		applied:          0,
-		compactThreshold: defaultCompactThreshold,
+		ents:      make([]pb.Entry, 1),
+		unstable:  0,
+		committed: 0,
+		applied:   0,
 	}
 }
 
-func (l *raftLog) isEmpty() bool {
-	return l.offset == 0 && len(l.ents) == 1
-}
-
 func (l *raftLog) load(ents []pb.Entry) {
+	if l.offset != ents[0].Index {
+		panic("entries loaded don't match offset index")
+	}
 	l.ents = ents
 	l.unstable = l.offset + uint64(len(ents))
 }
@@ -46,8 +52,10 @@ func (l *raftLog) String() string {
 	return fmt.Sprintf("offset=%d committed=%d applied=%d len(ents)=%d", l.offset, l.committed, l.applied, len(l.ents))
 }
 
-func (l *raftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry) bool {
-	lastnewi := index + uint64(len(ents))
+// maybeAppend returns (0, false) if the entries cannot be appended. Otherwise,
+// it returns (last index of new entries, true).
+func (l *raftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry) (lastnewi uint64, ok bool) {
+	lastnewi = index + uint64(len(ents))
 	if l.matchTerm(index, logTerm) {
 		from := index + 1
 		ci := l.findConflict(from, ents)
@@ -63,9 +71,9 @@ func (l *raftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry
 		if l.committed < tocommit {
 			l.committed = tocommit
 		}
-		return true
+		return lastnewi, true
 	}
-	return false
+	return 0, false
 }
 
 func (l *raftLog) append(after uint64, ents ...pb.Entry) uint64 {
@@ -74,7 +82,19 @@ func (l *raftLog) append(after uint64, ents ...pb.Entry) uint64 {
 	return l.lastIndex()
 }
 
+// findConflict finds the index of the conflict.
+// It returns the first pair of conflicting entries between the existing
+// entries and the given entries, if there are any.
+// If there is no conflicting entries, and the existing entries contains
+// all the given entries, zero will be returned.
+// If there is no conflicting entries, but the given entries contains new
+// entries, the index of the first new entry will be returned.
+// An entry is considered to be conflicting if it has the same index but
+// a different term.
+// The first entry MUST have an index equal to the argument 'from'.
+// The index of the given entries MUST be continuously increasing.
 func (l *raftLog) findConflict(from uint64, ents []pb.Entry) uint64 {
+	// TODO(xiangli): validate the index of ents
 	for i, ne := range ents {
 		if oe := l.at(from + uint64(i)); oe == nil || oe.Term != ne.Term {
 			return from + uint64(i)
@@ -112,9 +132,9 @@ func (l *raftLog) resetNextEnts() {
 	}
 }
 
-func (l *raftLog) lastIndex() uint64 {
-	return uint64(len(l.ents)) - 1 + l.offset
-}
+func (l *raftLog) lastIndex() uint64 { return uint64(len(l.ents)) - 1 + l.offset }
+
+func (l *raftLog) lastTerm() uint64 { return l.term(l.lastIndex()) }
 
 func (l *raftLog) term(i uint64) uint64 {
 	if e := l.at(i); e != nil {
@@ -133,9 +153,14 @@ func (l *raftLog) entries(i uint64) []pb.Entry {
 	return l.slice(i, l.lastIndex()+1)
 }
 
-func (l *raftLog) isUpToDate(i, term uint64) bool {
-	e := l.at(l.lastIndex())
-	return term > e.Term || (term == e.Term && i >= l.lastIndex())
+// isUpToDate determines if the given (lastIndex,term) log is more up-to-date
+// by comparing the index and term of the last entries in the existing logs.
+// If the logs have last entries with different terms, then the log with the
+// later term is more up-to-date. If the logs end with the same term, then
+// whichever log has the larger lastIndex is more up-to-date. If the logs are
+// the same, the given log is up-to-date.
+func (l *raftLog) isUpToDate(lasti, term uint64) bool {
+	return term > l.lastTerm() || (term == l.lastTerm() && lasti >= l.lastIndex())
 }
 
 func (l *raftLog) matchTerm(i, term uint64) bool {
@@ -168,18 +193,13 @@ func (l *raftLog) compact(i uint64) uint64 {
 	return uint64(len(l.ents))
 }
 
-func (l *raftLog) snap(d []byte, index, term uint64, nodes []uint64, removed []uint64) {
+func (l *raftLog) snap(d []byte, index, term uint64, nodes []uint64) {
 	l.snapshot = pb.Snapshot{
-		Data:         d,
-		Nodes:        nodes,
-		Index:        index,
-		Term:         term,
-		RemovedNodes: removed,
+		Data:  d,
+		Nodes: nodes,
+		Index: index,
+		Term:  term,
 	}
-}
-
-func (l *raftLog) shouldCompact() bool {
-	return (l.applied - l.offset) > l.compactThreshold
 }
 
 func (l *raftLog) restore(s pb.Snapshot) {

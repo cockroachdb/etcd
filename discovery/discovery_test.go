@@ -1,20 +1,94 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package discovery
 
 import (
 	"errors"
 	"math/rand"
+	"net/http"
+	"os"
+	"reflect"
 	"sort"
 	"strconv"
-
-	"reflect"
 	"testing"
 	"time"
 
+	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
+	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/jonboulle/clockwork"
 	"github.com/coreos/etcd/client"
 )
 
+func TestProxyFuncFromEnvUnset(t *testing.T) {
+	os.Setenv(DiscoveryProxyEnv, "")
+	pf, err := proxyFuncFromEnv()
+	if pf != nil {
+		t.Fatal("unexpected non-nil proxyFunc")
+	}
+	if err != nil {
+		t.Fatalf("unexpected non-nil err: %v", err)
+	}
+}
+
+func TestProxyFuncFromEnvBad(t *testing.T) {
+	tests := []string{
+		"%%",
+		"http://foo.com/%1",
+	}
+	for i, in := range tests {
+		os.Setenv(DiscoveryProxyEnv, in)
+		pf, err := proxyFuncFromEnv()
+		if pf != nil {
+			t.Errorf("#%d: unexpected non-nil proxyFunc", i)
+		}
+		if err == nil {
+			t.Errorf("#%d: unexpected nil err", i)
+		}
+	}
+}
+
+func TestProxyFuncFromEnv(t *testing.T) {
+	tests := map[string]string{
+		"bar.com":              "http://bar.com",
+		"http://disco.foo.bar": "http://disco.foo.bar",
+	}
+	for in, w := range tests {
+		os.Setenv(DiscoveryProxyEnv, in)
+		pf, err := proxyFuncFromEnv()
+		if pf == nil {
+			t.Errorf("%s: unexpected nil proxyFunc", in)
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: unexpected non-nil err: %v", in, err)
+			continue
+		}
+		g, err := pf(&http.Request{})
+		if err != nil {
+			t.Errorf("%s: unexpected non-nil err: %v", in, err)
+		}
+		if g.String() != w {
+			t.Errorf("%s: proxyURL=%q, want %q", in, g, w)
+		}
+
+	}
+}
+
 func TestCheckCluster(t *testing.T) {
-	cluster := "1000"
+	cluster := "/prefix/1000"
 	self := "/1000/1"
 
 	tests := []struct {
@@ -24,8 +98,9 @@ func TestCheckCluster(t *testing.T) {
 	}{
 		{
 			// self is in the size range
-			client.Nodes{
+			[]*client.Node{
 				{Key: "/1000/_config/size", Value: "3", CreatedIndex: 1},
+				{Key: "/1000/_config/"},
 				{Key: self, CreatedIndex: 2},
 				{Key: "/1000/2", CreatedIndex: 3},
 				{Key: "/1000/3", CreatedIndex: 4},
@@ -36,8 +111,9 @@ func TestCheckCluster(t *testing.T) {
 		},
 		{
 			// self is in the size range
-			client.Nodes{
+			[]*client.Node{
 				{Key: "/1000/_config/size", Value: "3", CreatedIndex: 1},
+				{Key: "/1000/_config/"},
 				{Key: "/1000/2", CreatedIndex: 2},
 				{Key: "/1000/3", CreatedIndex: 3},
 				{Key: self, CreatedIndex: 4},
@@ -48,8 +124,9 @@ func TestCheckCluster(t *testing.T) {
 		},
 		{
 			// self is out of the size range
-			client.Nodes{
+			[]*client.Node{
 				{Key: "/1000/_config/size", Value: "3", CreatedIndex: 1},
+				{Key: "/1000/_config/"},
 				{Key: "/1000/2", CreatedIndex: 2},
 				{Key: "/1000/3", CreatedIndex: 3},
 				{Key: "/1000/4", CreatedIndex: 4},
@@ -60,8 +137,9 @@ func TestCheckCluster(t *testing.T) {
 		},
 		{
 			// self is not in the cluster
-			client.Nodes{
+			[]*client.Node{
 				{Key: "/1000/_config/size", Value: "3", CreatedIndex: 1},
+				{Key: "/1000/_config/"},
 				{Key: "/1000/2", CreatedIndex: 2},
 				{Key: "/1000/3", CreatedIndex: 3},
 			},
@@ -69,8 +147,9 @@ func TestCheckCluster(t *testing.T) {
 			3,
 		},
 		{
-			client.Nodes{
+			[]*client.Node{
 				{Key: "/1000/_config/size", Value: "3", CreatedIndex: 1},
+				{Key: "/1000/_config/"},
 				{Key: "/1000/2", CreatedIndex: 2},
 				{Key: "/1000/3", CreatedIndex: 3},
 				{Key: "/1000/4", CreatedIndex: 4},
@@ -80,7 +159,7 @@ func TestCheckCluster(t *testing.T) {
 		},
 		{
 			// bad size key
-			client.Nodes{
+			[]*client.Node{
 				{Key: "/1000/_config/size", Value: "bad", CreatedIndex: 1},
 			},
 			ErrBadSizeKey,
@@ -88,7 +167,7 @@ func TestCheckCluster(t *testing.T) {
 		},
 		{
 			// no size key
-			client.Nodes{},
+			[]*client.Node{},
 			ErrSizeNotFound,
 			0,
 		},
@@ -101,7 +180,7 @@ func TestCheckCluster(t *testing.T) {
 			rs = append(rs, &client.Response{
 				Node: &client.Node{
 					Key:   cluster,
-					Nodes: tt.nodes,
+					Nodes: tt.nodes[1:],
 				},
 			})
 		}
@@ -110,9 +189,16 @@ func TestCheckCluster(t *testing.T) {
 
 		cRetry := &clientWithRetry{failTimes: 3}
 		cRetry.rs = rs
-		dRetry := discovery{cluster: cluster, id: 1, c: cRetry, timeoutTimescale: time.Millisecond * 2}
+		fc := clockwork.NewFakeClock()
+		dRetry := discovery{cluster: cluster, id: 1, c: cRetry, clock: fc}
 
 		for _, d := range []discovery{d, dRetry} {
+			go func() {
+				for i := uint(1); i <= nRetries; i++ {
+					fc.BlockUntil(1)
+					fc.Advance(time.Second * (0x1 << i))
+				}
+			}()
 			ns, size, err := d.checkCluster()
 			if err != tt.werr {
 				t.Errorf("#%d: err = %v, want %v", i, err, tt.werr)
@@ -129,53 +215,37 @@ func TestCheckCluster(t *testing.T) {
 
 func TestWaitNodes(t *testing.T) {
 	all := client.Nodes{
-		{Key: "/1000/1", CreatedIndex: 2},
-		{Key: "/1000/2", CreatedIndex: 3},
-		{Key: "/1000/3", CreatedIndex: 4},
+		0: {Key: "/1000/1", CreatedIndex: 2},
+		1: {Key: "/1000/2", CreatedIndex: 3},
+		2: {Key: "/1000/3", CreatedIndex: 4},
 	}
 
 	tests := []struct {
 		nodes client.Nodes
-		size  int
 		rs    []*client.Response
-
-		werr error
-		wall client.Nodes
 	}{
 		{
 			all,
-			3,
 			[]*client.Response{},
-			nil,
-			all,
 		},
 		{
 			all[:1],
-			3,
 			[]*client.Response{
 				{Node: &client.Node{Key: "/1000/2", CreatedIndex: 3}},
 				{Node: &client.Node{Key: "/1000/3", CreatedIndex: 4}},
 			},
-			nil,
-			all,
 		},
 		{
 			all[:2],
-			3,
 			[]*client.Response{
 				{Node: &client.Node{Key: "/1000/3", CreatedIndex: 4}},
 			},
-			nil,
-			all,
 		},
 		{
 			append(all, &client.Node{Key: "/1000/4", CreatedIndex: 5}),
-			3,
 			[]*client.Response{
 				{Node: &client.Node{Key: "/1000/3", CreatedIndex: 4}},
 			},
-			nil,
-			all,
 		},
 	}
 
@@ -190,7 +260,7 @@ func TestWaitNodes(t *testing.T) {
 			retryScanResp = append(retryScanResp, &client.Response{
 				Node: &client.Node{
 					Key:   "1000",
-					Value: strconv.Itoa(tt.size),
+					Value: strconv.Itoa(3),
 				},
 			})
 			retryScanResp = append(retryScanResp, &client.Response{
@@ -203,19 +273,26 @@ func TestWaitNodes(t *testing.T) {
 			rs: retryScanResp,
 			w:  &watcherWithRetry{rs: tt.rs, failTimes: 2},
 		}
+		fc := clockwork.NewFakeClock()
 		dRetry := &discovery{
-			cluster:          "1000",
-			c:                cRetry,
-			timeoutTimescale: time.Millisecond * 2,
+			cluster: "1000",
+			c:       cRetry,
+			clock:   fc,
 		}
 
 		for _, d := range []*discovery{d, dRetry} {
-			g, err := d.waitNodes(tt.nodes, tt.size)
-			if err != tt.werr {
-				t.Errorf("#%d: err = %v, want %v", i, err, tt.werr)
+			go func() {
+				for i := uint(1); i <= nRetries; i++ {
+					fc.BlockUntil(1)
+					fc.Advance(time.Second * (0x1 << i))
+				}
+			}()
+			g, err := d.waitNodes(tt.nodes, 3)
+			if err != nil {
+				t.Errorf("#%d: err = %v, want %v", i, err, nil)
 			}
-			if !reflect.DeepEqual(g, tt.wall) {
-				t.Errorf("#%d: all = %v, want %v", i, g, tt.wall)
+			if !reflect.DeepEqual(g, all) {
+				t.Errorf("#%d: all = %v, want %v", i, g, all)
 			}
 		}
 	}
@@ -232,7 +309,7 @@ func TestCreateSelf(t *testing.T) {
 	errwc := &clientWithResp{rs, errw}
 
 	tests := []struct {
-		c    client.Client
+		c    client.KeysAPI
 		werr error
 	}{
 		// no error
@@ -253,9 +330,9 @@ func TestCreateSelf(t *testing.T) {
 
 func TestNodesToCluster(t *testing.T) {
 	nodes := client.Nodes{
-		{Key: "/1000/1", Value: "1=1.1.1.1", CreatedIndex: 1},
-		{Key: "/1000/2", Value: "2=2.2.2.2", CreatedIndex: 2},
-		{Key: "/1000/3", Value: "3=3.3.3.3", CreatedIndex: 3},
+		0: {Key: "/1000/1", Value: "1=1.1.1.1", CreatedIndex: 1},
+		1: {Key: "/1000/2", Value: "2=2.2.2.2", CreatedIndex: 2},
+		2: {Key: "/1000/3", Value: "3=3.3.3.3", CreatedIndex: 3},
 	}
 	w := "1=1.1.1.1,2=2.2.2.2,3=3.3.3.3"
 
@@ -267,10 +344,10 @@ func TestNodesToCluster(t *testing.T) {
 
 func TestSortableNodes(t *testing.T) {
 	ns := client.Nodes{
-		{CreatedIndex: 5},
-		{CreatedIndex: 1},
-		{CreatedIndex: 3},
-		{CreatedIndex: 4},
+		0: {CreatedIndex: 5},
+		1: {CreatedIndex: 1},
+		2: {CreatedIndex: 3},
+		3: {CreatedIndex: 4},
 	}
 	// add some randomness
 	for i := 0; i < 10000; i++ {
@@ -297,9 +374,20 @@ func TestSortableNodes(t *testing.T) {
 func TestRetryFailure(t *testing.T) {
 	cluster := "1000"
 	c := &clientWithRetry{failTimes: 4}
-	d := discovery{cluster: cluster, id: 1, c: c, timeoutTimescale: time.Millisecond * 2}
-	_, _, err := d.checkCluster()
-	if err != ErrTooManyRetries {
+	fc := clockwork.NewFakeClock()
+	d := discovery{
+		cluster: cluster,
+		id:      1,
+		c:       c,
+		clock:   fc,
+	}
+	go func() {
+		for i := uint(1); i <= nRetries; i++ {
+			fc.BlockUntil(1)
+			fc.Advance(time.Second * (0x1 << i))
+		}
+	}()
+	if _, _, err := d.checkCluster(); err != ErrTooManyRetries {
 		t.Errorf("err = %v, want %v", err, ErrTooManyRetries)
 	}
 }
@@ -309,7 +397,7 @@ type clientWithResp struct {
 	w  client.Watcher
 }
 
-func (c *clientWithResp) Create(key string, value string, ttl time.Duration) (*client.Response, error) {
+func (c *clientWithResp) Create(ctx context.Context, key string, value string, ttl time.Duration) (*client.Response, error) {
 	if len(c.rs) == 0 {
 		return &client.Response{}, nil
 	}
@@ -318,7 +406,7 @@ func (c *clientWithResp) Create(key string, value string, ttl time.Duration) (*c
 	return r, nil
 }
 
-func (c *clientWithResp) Get(key string) (*client.Response, error) {
+func (c *clientWithResp) Get(ctx context.Context, key string) (*client.Response, error) {
 	if len(c.rs) == 0 {
 		return &client.Response{}, client.ErrKeyNoExist
 	}
@@ -340,11 +428,11 @@ type clientWithErr struct {
 	w   client.Watcher
 }
 
-func (c *clientWithErr) Create(key string, value string, ttl time.Duration) (*client.Response, error) {
+func (c *clientWithErr) Create(ctx context.Context, key string, value string, ttl time.Duration) (*client.Response, error) {
 	return &client.Response{}, c.err
 }
 
-func (c *clientWithErr) Get(key string) (*client.Response, error) {
+func (c *clientWithErr) Get(ctx context.Context, key string) (*client.Response, error) {
 	return &client.Response{}, c.err
 }
 
@@ -360,7 +448,7 @@ type watcherWithResp struct {
 	rs []*client.Response
 }
 
-func (w *watcherWithResp) Next() (*client.Response, error) {
+func (w *watcherWithResp) Next(context.Context) (*client.Response, error) {
 	if len(w.rs) == 0 {
 		return &client.Response{}, nil
 	}
@@ -373,40 +461,41 @@ type watcherWithErr struct {
 	err error
 }
 
-func (w *watcherWithErr) Next() (*client.Response, error) {
+func (w *watcherWithErr) Next(context.Context) (*client.Response, error) {
 	return &client.Response{}, w.err
 }
 
-// Fails every other time
+// clientWithRetry will timeout all requests up to failTimes
 type clientWithRetry struct {
 	clientWithResp
 	failCount int
 	failTimes int
 }
 
-func (c *clientWithRetry) Create(key string, value string, ttl time.Duration) (*client.Response, error) {
+func (c *clientWithRetry) Create(ctx context.Context, key string, value string, ttl time.Duration) (*client.Response, error) {
 	if c.failCount < c.failTimes {
 		c.failCount++
 		return nil, client.ErrTimeout
 	}
-	return c.clientWithResp.Create(key, value, ttl)
+	return c.clientWithResp.Create(ctx, key, value, ttl)
 }
 
-func (c *clientWithRetry) Get(key string) (*client.Response, error) {
+func (c *clientWithRetry) Get(ctx context.Context, key string) (*client.Response, error) {
 	if c.failCount < c.failTimes {
 		c.failCount++
 		return nil, client.ErrTimeout
 	}
-	return c.clientWithResp.Get(key)
+	return c.clientWithResp.Get(ctx, key)
 }
 
+// watcherWithRetry will timeout all requests up to failTimes
 type watcherWithRetry struct {
 	rs        []*client.Response
 	failCount int
 	failTimes int
 }
 
-func (w *watcherWithRetry) Next() (*client.Response, error) {
+func (w *watcherWithRetry) Next(context.Context) (*client.Response, error) {
 	if w.failCount < w.failTimes {
 		w.failCount++
 		return nil, client.ErrTimeout

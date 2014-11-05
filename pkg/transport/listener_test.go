@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package transport
 
 import (
@@ -69,7 +85,7 @@ func TestNewTransportTLSInfo(t *testing.T) {
 
 		gotTLSClientConfig := trans.TLSClientConfig != nil
 		if tt.wantTLSClientConfig != gotTLSClientConfig {
-			t.Fatalf("%#d: wantTLSClientConfig=%t but gotTLSClientConfig=%t", i, tt.wantTLSClientConfig, gotTLSClientConfig)
+			t.Fatalf("#%d: wantTLSClientConfig=%t but gotTLSClientConfig=%t", i, tt.wantTLSClientConfig, gotTLSClientConfig)
 		}
 	}
 }
@@ -177,7 +193,7 @@ func TestTLSInfoConfigFuncs(t *testing.T) {
 		}
 
 		if tt.wantCAs != (sCfg.ClientCAs != nil) {
-			t.Errorf("%#d: wantCAs=%t but ClientCAs=%v", i, tt.wantCAs, sCfg.ClientCAs)
+			t.Errorf("#%d: wantCAs=%t but ClientCAs=%v", i, tt.wantCAs, sCfg.ClientCAs)
 		}
 
 		cCfg, err := tt.info.ClientConfig()
@@ -186,7 +202,7 @@ func TestTLSInfoConfigFuncs(t *testing.T) {
 		}
 
 		if tt.wantCAs != (cCfg.RootCAs != nil) {
-			t.Errorf("%#d: wantCAs=%t but RootCAs=%v", i, tt.wantCAs, sCfg.RootCAs)
+			t.Errorf("#%d: wantCAs=%t but RootCAs=%v", i, tt.wantCAs, sCfg.RootCAs)
 		}
 	}
 }
