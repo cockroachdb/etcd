@@ -95,8 +95,12 @@ func (g *groupState) commitReady(rd Ready) {
 	if !IsEmptySnap(rd.Snapshot) {
 		g.prevSnapi = rd.Snapshot.Index
 	}
-	g.raft.raftLog.resetNextEnts()
-	g.raft.raftLog.resetUnstable()
+	if len(rd.Entries) > 0 {
+		// TODO(bdarnell): stableTo(rd.Snapshot.Index) if any
+		g.raft.raftLog.stableTo(rd.Entries[len(rd.Entries)-1].Index)
+	}
+	g.raft.raftLog.appliedTo(rd.HardState.Commit)
+
 	g.raft.msgs = nil
 }
 
