@@ -83,6 +83,14 @@ exit 1
 
 In a number of cases you might not know the IPs of your cluster peers ahead of time. This is common when utilizing cloud providers or when your network uses DHCP. In these cases you can use an existing etcd cluster to bootstrap a new one. We call this process "discovery".
 
+### Lifetime of a Discovery URL
+
+A discovery URL identifies a unique etcd cluster. Instead of reusing a discovery URL, you should always create discovery URLs for new clusters.
+
+Moreover, discovery URLs should ONLY be used for the initial bootstrapping of a cluster. To change cluster membership after the cluster is already running, see the [runtime reconfiguration][runtime] guide.
+
+[runtime]: https://github.com/coreos/etcd/blob/master/Documentation/0.5/runtime-configuration.md
+
 ### Custom etcd discovery service
 
 Discovery uses an existing cluster to bootstrap itself. If you are using your own etcd cluster you can create a URL like so:
@@ -92,6 +100,8 @@ $ curl -X PUT https://myetcd.local/v2/keys/discovery/6c007a14875d53d9bf0ef5a6fc0
 ```
 
 By setting the size key to the URL, you create a discovery URL with expected-cluster-size of 3.
+
+If you bootstrap an etcd cluster using discovery service with more than the expected number of etcd members, the extra etcd processes will [fall back][fall-back] to being [proxies][proxy] by default.
 
 The URL you will use in this case will be `https://myetcd.local/v2/keys/discovery/6c007a14875d53d9bf0ef5a6fc0257c817f0fb83` and the etcd members will use the `https://myetcd.local/v2/keys/discovery/6c007a14875d53d9bf0ef5a6fc0257c817f0fb83` directory for registration as they start.
 
@@ -122,6 +132,11 @@ https://discovery.etcd.io/3e86b59982e49066c5d813af1c2e2579cbf573de
 ```
 
 This will create the cluster with an initial expected size of 3 members. If you do not specify a size a default of 3 will be used.
+
+If you bootstrap an etcd cluster using discovery service with more than the expected number of etcd members, the extra etcd processes will [fall back][fall-back] to being [proxies][proxy] by default.
+
+[fall-back]: proxy.md#fallback-to-proxy-mode-with-discovery-service
+[proxy]: proxy.md
 
 ```
 ETCD_DISCOVERY=https://discovery.etcd.io/3e86b59982e49066c5d813af1c2e2579cbf573de

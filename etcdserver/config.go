@@ -27,14 +27,16 @@ import (
 
 // ServerConfig holds the configuration of etcd as taken from the command line or discovery.
 type ServerConfig struct {
-	Name         string
-	DiscoveryURL string
-	ClientURLs   types.URLs
-	DataDir      string
-	SnapCount    uint64
-	Cluster      *Cluster
-	ClusterState ClusterState
-	Transport    *http.Transport
+	Name            string
+	DiscoveryURL    string
+	DiscoveryProxy  string
+	ClientURLs      types.URLs
+	DataDir         string
+	SnapCount       uint64
+	Cluster         *Cluster
+	NewCluster      bool
+	ForceNewCluster bool
+	Transport       *http.Transport
 }
 
 // VerifyBootstrapConfig sanity-checks the initial config and returns an error
@@ -49,7 +51,7 @@ func (c *ServerConfig) VerifyBootstrapConfig() error {
 		return fmt.Errorf("cannot use %x as member id", raft.None)
 	}
 
-	if c.DiscoveryURL == "" && c.ClusterState != ClusterStateValueNew {
+	if c.DiscoveryURL == "" && !c.NewCluster {
 		return fmt.Errorf("initial cluster state unset and no wal or discovery URL found")
 	}
 

@@ -27,10 +27,12 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	etcdErr "github.com/coreos/etcd/error"
 	"github.com/coreos/etcd/pkg/flags"
 	"github.com/coreos/etcd/pkg/types"
+	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/store"
 )
 
@@ -45,6 +47,7 @@ type ClusterInfo interface {
 	// Members returns a slice of members sorted by their ID
 	Members() []*Member
 	Member(id types.ID) *Member
+	IsIDRemoved(id types.ID) bool
 }
 
 // Cluster is a list of Members that belong to the same raft cluster
@@ -56,6 +59,7 @@ type Cluster struct {
 	// removed id cannot be reused.
 	removed map[types.ID]bool
 	store   store.Store
+	sync.Mutex
 }
 
 // NewClusterFromString returns Cluster through given cluster token and parsing
@@ -89,33 +93,7 @@ func NewClusterFromString(token string, cluster string) (*Cluster, error) {
 func NewClusterFromStore(token string, st store.Store) *Cluster {
 	c := newCluster(token)
 	c.store = st
-
-	e, err := c.store.Get(storeMembersPrefix, true, true)
-	if err != nil {
-		if isKeyNotFound(err) {
-			return c
-		}
-		log.Panicf("get storeMembers should never fail: %v", err)
-	}
-	for _, n := range e.Node.Nodes {
-		m, err := nodeToMember(n)
-		if err != nil {
-			log.Panicf("nodeToMember should never fail: %v", err)
-		}
-		c.members[m.ID] = m
-	}
-
-	e, err = c.store.Get(storeRemovedMembersPrefix, true, true)
-	if err != nil {
-		if isKeyNotFound(err) {
-			return c
-		}
-		log.Panicf("get storeRemovedMembers should never fail: %v", err)
-	}
-	for _, n := range e.Node.Nodes {
-		c.removed[mustParseMemberIDFromKey(n.Key)] = true
-	}
-
+	c.members, c.removed = membersFromStore(c.store)
 	return c
 }
 
@@ -136,12 +114,14 @@ func newCluster(token string) *Cluster {
 	}
 }
 
-func (c Cluster) ID() types.ID { return c.id }
+func (c *Cluster) ID() types.ID { return c.id }
 
-func (c Cluster) Members() []*Member {
+func (c *Cluster) Members() []*Member {
+	c.Lock()
+	defer c.Unlock()
 	var sms SortableMemberSlice
 	for _, m := range c.members {
-		sms = append(sms, m)
+		sms = append(sms, m.Clone())
 	}
 	sort.Sort(sms)
 	return []*Member(sms)
@@ -154,25 +134,31 @@ func (s SortableMemberSlice) Less(i, j int) bool { return s[i].ID < s[j].ID }
 func (s SortableMemberSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
 func (c *Cluster) Member(id types.ID) *Member {
-	return c.members[id]
+	c.Lock()
+	defer c.Unlock()
+	return c.members[id].Clone()
 }
 
 // MemberByName returns a Member with the given name if exists.
 // If more than one member has the given name, it will panic.
 func (c *Cluster) MemberByName(name string) *Member {
+	c.Lock()
+	defer c.Unlock()
 	var memb *Member
 	for _, m := range c.members {
 		if m.Name == name {
 			if memb != nil {
-				panic("two members with the given name exist in the cluster")
+				log.Panicf("two members with the given name %q exist", name)
 			}
 			memb = m
 		}
 	}
-	return memb
+	return memb.Clone()
 }
 
-func (c Cluster) MemberIDs() []types.ID {
+func (c *Cluster) MemberIDs() []types.ID {
+	c.Lock()
+	defer c.Unlock()
 	var ids []types.ID
 	for _, m := range c.members {
 		ids = append(ids, m.ID)
@@ -182,13 +168,17 @@ func (c Cluster) MemberIDs() []types.ID {
 }
 
 func (c *Cluster) IsIDRemoved(id types.ID) bool {
+	c.Lock()
+	defer c.Unlock()
 	return c.removed[id]
 }
 
 // PeerURLs returns a list of all peer addresses. Each address is prefixed
 // with the scheme (currently "http://"). The returned list is sorted in
 // ascending lexicographical order.
-func (c Cluster) PeerURLs() []string {
+func (c *Cluster) PeerURLs() []string {
+	c.Lock()
+	defer c.Unlock()
 	endpoints := make([]string, 0)
 	for _, p := range c.members {
 		for _, addr := range p.PeerURLs {
@@ -202,7 +192,9 @@ func (c Cluster) PeerURLs() []string {
 // ClientURLs returns a list of all client addresses. Each address is prefixed
 // with the scheme (currently "http://"). The returned list is sorted in
 // ascending lexicographical order.
-func (c Cluster) ClientURLs() []string {
+func (c *Cluster) ClientURLs() []string {
+	c.Lock()
+	defer c.Unlock()
 	urls := make([]string, 0)
 	for _, p := range c.members {
 		for _, url := range p.ClientURLs {
@@ -213,7 +205,9 @@ func (c Cluster) ClientURLs() []string {
 	return urls
 }
 
-func (c Cluster) String() string {
+func (c *Cluster) String() string {
+	c.Lock()
+	defer c.Unlock()
 	sl := []string{}
 	for _, m := range c.members {
 		for _, u := range m.PeerURLs {
@@ -265,24 +259,63 @@ func (c *Cluster) SetID(id types.ID) { c.id = id }
 
 func (c *Cluster) SetStore(st store.Store) { c.store = st }
 
+// ValidateConfigurationChange takes a proposed ConfChange and
+// ensures that it is still valid.
+func (c *Cluster) ValidateConfigurationChange(cc raftpb.ConfChange) error {
+	members, removed := membersFromStore(c.store)
+	if removed[types.ID(cc.NodeID)] {
+		return ErrIDRemoved
+	}
+	switch cc.Type {
+	case raftpb.ConfChangeAddNode:
+		if members[types.ID(cc.NodeID)] != nil {
+			return ErrIDExists
+		}
+		urls := make(map[string]bool)
+		for _, m := range members {
+			for _, u := range m.PeerURLs {
+				urls[u] = true
+			}
+		}
+		m := new(Member)
+		if err := json.Unmarshal(cc.Context, m); err != nil {
+			log.Panicf("unmarshal member should never fail: %v", err)
+		}
+		for _, u := range m.PeerURLs {
+			if urls[u] {
+				return ErrPeerURLexists
+			}
+		}
+	case raftpb.ConfChangeRemoveNode:
+		if members[types.ID(cc.NodeID)] == nil {
+			return ErrIDNotFound
+		}
+	default:
+		log.Panicf("ConfChange type should be either AddNode or RemoveNode")
+	}
+	return nil
+}
+
 // AddMember puts a new Member into the store.
 // A Member with a matching id must not exist.
 func (c *Cluster) AddMember(m *Member) {
+	c.Lock()
+	defer c.Unlock()
 	b, err := json.Marshal(m.RaftAttributes)
 	if err != nil {
-		log.Panicf("marshal error: %v", err)
+		log.Panicf("marshal raftAttributes should never fail: %v", err)
 	}
 	p := path.Join(memberStoreKey(m.ID), raftAttributesSuffix)
 	if _, err := c.store.Create(p, false, string(b), false, store.Permanent); err != nil {
-		log.Panicf("add raftAttributes should never fail: %v", err)
+		log.Panicf("create raftAttributes should never fail: %v", err)
 	}
 	b, err = json.Marshal(m.Attributes)
 	if err != nil {
-		log.Panicf("marshal error: %v", err)
+		log.Panicf("marshal attributes should never fail: %v", err)
 	}
 	p = path.Join(memberStoreKey(m.ID), attributesSuffix)
 	if _, err := c.store.Create(p, false, string(b), false, store.Permanent); err != nil {
-		log.Panicf("add attributes should never fail: %v", err)
+		log.Panicf("create attributes should never fail: %v", err)
 	}
 	c.members[m.ID] = m
 }
@@ -290,14 +323,22 @@ func (c *Cluster) AddMember(m *Member) {
 // RemoveMember removes a member from the store.
 // The given id MUST exist, or the function panics.
 func (c *Cluster) RemoveMember(id types.ID) {
+	c.Lock()
+	defer c.Unlock()
 	if _, err := c.store.Delete(memberStoreKey(id), true, true); err != nil {
-		log.Panicf("delete peer should never fail: %v", err)
+		log.Panicf("delete member should never fail: %v", err)
 	}
 	delete(c.members, id)
 	if _, err := c.store.Create(removedMemberStoreKey(id), false, "", false, store.Permanent); err != nil {
-		log.Panicf("creating RemovedMember should never fail: %v", err)
+		log.Panicf("create removedMember should never fail: %v", err)
 	}
 	c.removed[id] = true
+}
+
+func (c *Cluster) UpdateMemberAttributes(id types.ID, attr Attributes) {
+	c.Lock()
+	defer c.Unlock()
+	c.members[id].Attributes = attr
 }
 
 // nodeToMember builds member through a store node.
@@ -320,6 +361,37 @@ func nodeToMember(n *store.NodeExtern) (*Member, error) {
 		return m, fmt.Errorf("unmarshal raftAttributes error: %v", err)
 	}
 	return m, nil
+}
+
+func membersFromStore(st store.Store) (map[types.ID]*Member, map[types.ID]bool) {
+	members := make(map[types.ID]*Member)
+	removed := make(map[types.ID]bool)
+	e, err := st.Get(storeMembersPrefix, true, true)
+	if err != nil {
+		if isKeyNotFound(err) {
+			return members, removed
+		}
+		log.Panicf("get storeMembers should never fail: %v", err)
+	}
+	for _, n := range e.Node.Nodes {
+		m, err := nodeToMember(n)
+		if err != nil {
+			log.Panicf("nodeToMember should never fail: %v", err)
+		}
+		members[m.ID] = m
+	}
+
+	e, err = st.Get(storeRemovedMembersPrefix, true, true)
+	if err != nil {
+		if isKeyNotFound(err) {
+			return members, removed
+		}
+		log.Panicf("get storeRemovedMembers should never fail: %v", err)
+	}
+	for _, n := range e.Node.Nodes {
+		removed[mustParseMemberIDFromKey(n.Key)] = true
+	}
+	return members, removed
 }
 
 func isKeyNotFound(err error) bool {

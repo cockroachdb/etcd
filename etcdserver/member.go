@@ -75,9 +75,30 @@ func NewMember(name string, peerURLs types.URLs, clusterName string, now *time.T
 // It will panic if there is no PeerURLs available in Member.
 func (m *Member) PickPeerURL() string {
 	if len(m.PeerURLs) == 0 {
-		panic("member should always have some peer url")
+		log.Panicf("member should always have some peer url")
 	}
 	return m.PeerURLs[rand.Intn(len(m.PeerURLs))]
+}
+
+func (m *Member) Clone() *Member {
+	if m == nil {
+		return nil
+	}
+	mm := &Member{
+		ID: m.ID,
+		Attributes: Attributes{
+			Name: m.Name,
+		},
+	}
+	if m.PeerURLs != nil {
+		mm.PeerURLs = make([]string, len(m.PeerURLs))
+		copy(mm.PeerURLs, m.PeerURLs)
+	}
+	if m.ClientURLs != nil {
+		mm.ClientURLs = make([]string, len(m.ClientURLs))
+		copy(mm.ClientURLs, m.ClientURLs)
+	}
+	return mm
 }
 
 func memberStoreKey(id types.ID) string {

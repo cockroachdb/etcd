@@ -23,21 +23,25 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/coreos/etcd/client"
 	"github.com/coreos/etcd/etcdserver"
 	"github.com/coreos/etcd/etcdserver/etcdhttp"
-	"github.com/coreos/etcd/pkg/transport"
+	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 	"github.com/coreos/etcd/pkg/types"
+
+	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
 )
 
 const (
-	tickDuration = 5 * time.Millisecond
-	clusterName  = "etcd"
+	tickDuration   = 10 * time.Millisecond
+	clusterName    = "etcd"
+	requestTimeout = 2 * time.Second
 )
 
 func init() {
@@ -50,107 +54,163 @@ func TestClusterOf3(t *testing.T) { testCluster(t, 3) }
 
 func testCluster(t *testing.T, size int) {
 	defer afterTest(t)
-	c := &cluster{Size: size}
+	c := NewCluster(t, size)
 	c.Launch(t)
-	for i := 0; i < size; i++ {
-		for _, u := range c.Members[i].ClientURLs {
-			var err error
-			for j := 0; j < 3; j++ {
-				if err = setKey(u, "/foo", "bar"); err == nil {
-					break
-				}
-			}
-			if err != nil {
-				t.Errorf("setKey on %v error: %v", u.String(), err)
-			}
+	defer c.Terminate(t)
+	for i, u := range c.URLs() {
+		cc := mustNewHTTPClient(t, []string{u})
+		kapi := client.NewKeysAPI(cc)
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		if _, err := kapi.Create(ctx, fmt.Sprintf("/%d", i), "bar", -1); err != nil {
+			t.Errorf("create on %s error: %v", u, err)
 		}
+		cancel()
 	}
-	c.Terminate(t)
 }
 
-// TODO: use etcd client
-func setKey(u url.URL, key string, value string) error {
-	u.Path = "/v2/keys" + key
-	v := url.Values{"value": []string{value}}
-	req, err := http.NewRequest("PUT", u.String(), strings.NewReader(v.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("statusCode = %d, want %d or %d", resp.StatusCode, http.StatusOK, http.StatusCreated)
-	}
-	return nil
-}
+func TestClusterOf1UsingDiscovery(t *testing.T) { testClusterUsingDiscovery(t, 1) }
+func TestClusterOf3UsingDiscovery(t *testing.T) { testClusterUsingDiscovery(t, 3) }
 
-type cluster struct {
-	Size    int
-	Members []member
+func testClusterUsingDiscovery(t *testing.T, size int) {
+	defer afterTest(t)
+	dc := NewCluster(t, 1)
+	dc.Launch(t)
+	defer dc.Terminate(t)
+	// init discovery token space
+	dcc := mustNewHTTPClient(t, dc.URLs())
+	dkapi := client.NewKeysAPI(dcc)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	if _, err := dkapi.Create(ctx, "/_config/size", fmt.Sprintf("%d", size), -1); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	c := NewClusterByDiscovery(t, size, dc.URL(0)+"/v2/keys")
+	c.Launch(t)
+	defer c.Terminate(t)
+
+	for i, u := range c.URLs() {
+		cc := mustNewHTTPClient(t, []string{u})
+		kapi := client.NewKeysAPI(cc)
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		if _, err := kapi.Create(ctx, fmt.Sprintf("/%d", i), "bar", -1); err != nil {
+			t.Errorf("create on %s error: %v", u, err)
+		}
+		cancel()
+	}
 }
 
 // TODO: support TLS
-func (c *cluster) Launch(t *testing.T) {
-	if c.Size <= 0 {
-		t.Fatalf("cluster size <= 0")
-	}
+type cluster struct {
+	Members []*member
+}
 
-	lns := make([]net.Listener, c.Size)
-	addrs := make([]string, c.Size)
-	for i := 0; i < c.Size; i++ {
-		l := newLocalListener(t)
-		// each member claims only one peer listener
-		lns[i] = l
-		addrs[i] = fmt.Sprintf("%v=%v", c.name(i), "http://"+l.Addr().String())
+// NewCluster returns an unlaunched cluster of the given size which has been
+// set to use static bootstrap.
+func NewCluster(t *testing.T, size int) *cluster {
+	c := &cluster{}
+	ms := make([]*member, size)
+	for i := 0; i < size; i++ {
+		ms[i] = newMember(t, c.name(i))
+	}
+	c.Members = ms
+
+	addrs := make([]string, 0)
+	for _, m := range ms {
+		for _, l := range m.PeerListeners {
+			addrs = append(addrs, fmt.Sprintf("%s=%s", m.Name, "http://"+l.Addr().String()))
+		}
 	}
 	clusterStr := strings.Join(addrs, ",")
-
 	var err error
-	for i := 0; i < c.Size; i++ {
-		m := member{}
-		m.PeerListeners = []net.Listener{lns[i]}
-		cln := newLocalListener(t)
-		m.ClientListeners = []net.Listener{cln}
-		m.Name = c.name(i)
-		m.ClientURLs, err = types.NewURLs([]string{"http://" + cln.Addr().String()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		m.DataDir, err = ioutil.TempDir(os.TempDir(), "etcd")
-		if err != nil {
-			t.Fatal(err)
-		}
+	for _, m := range ms {
 		m.Cluster, err = etcdserver.NewClusterFromString(clusterName, clusterStr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		m.ClusterState = etcdserver.ClusterStateValueNew
-		m.Transport, err = transport.NewTransport(transport.TLSInfo{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		// TODO: need the support of graceful stop in Sender to remove this
-		m.Transport.DisableKeepAlives = true
-		m.Transport.Dial = (&net.Dialer{Timeout: 100 * time.Millisecond}).Dial
-
-		m.Launch(t)
-		c.Members = append(c.Members, m)
 	}
+
+	return c
+}
+
+// NewClusterUsingDiscovery returns an unlaunched cluster of the given size
+// which has been set to use the given url as discovery service to bootstrap.
+func NewClusterByDiscovery(t *testing.T, size int, url string) *cluster {
+	c := &cluster{}
+	ms := make([]*member, size)
+	for i := 0; i < size; i++ {
+		ms[i] = newMember(t, c.name(i))
+		ms[i].DiscoveryURL = url
+	}
+	c.Members = ms
+	return c
+}
+
+func (c *cluster) Launch(t *testing.T) {
+	var wg sync.WaitGroup
+	for _, m := range c.Members {
+		wg.Add(1)
+		// Members are launched in separate goroutines because if they boot
+		// using discovery url, they have to wait for others to register to continue.
+		go func(m *member) {
+			m.Launch(t)
+			wg.Done()
+		}(m)
+	}
+	wg.Wait()
+	// wait cluster to be stable to receive future client requests
+	c.waitClientURLsPublished(t)
 }
 
 func (c *cluster) URL(i int) string {
 	return c.Members[i].ClientURLs[0].String()
 }
 
+func (c *cluster) URLs() []string {
+	urls := make([]string, 0)
+	for _, m := range c.Members {
+		for _, u := range m.ClientURLs {
+			urls = append(urls, u.String())
+		}
+	}
+	return urls
+}
+
 func (c *cluster) Terminate(t *testing.T) {
 	for _, m := range c.Members {
 		m.Terminate(t)
 	}
+}
+
+func (c *cluster) waitClientURLsPublished(t *testing.T) {
+	timer := time.AfterFunc(10*time.Second, func() {
+		t.Fatal("wait too long for client urls publish")
+	})
+	cc := mustNewHTTPClient(t, []string{c.URL(0)})
+	ma := client.NewMembersAPI(cc)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		membs, err := ma.List(ctx)
+		cancel()
+		if err == nil && c.checkClientURLsPublished(membs) {
+			break
+		}
+		time.Sleep(tickDuration)
+	}
+	timer.Stop()
+	return
+}
+
+func (c *cluster) checkClientURLsPublished(membs []httptypes.Member) bool {
+	if len(membs) != len(c.Members) {
+		return false
+	}
+	for _, m := range membs {
+		if len(m.ClientURLs) == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *cluster) name(i int) string {
@@ -173,6 +233,32 @@ type member struct {
 	hss []*httptest.Server
 }
 
+func newMember(t *testing.T, name string) *member {
+	var err error
+	m := &member{}
+	pln := newLocalListener(t)
+	m.PeerListeners = []net.Listener{pln}
+	cln := newLocalListener(t)
+	m.ClientListeners = []net.Listener{cln}
+	m.Name = name
+	m.ClientURLs, err = types.NewURLs([]string{"http://" + cln.Addr().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.DataDir, err = ioutil.TempDir(os.TempDir(), "etcd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clusterStr := fmt.Sprintf("%s=http://%s", name, pln.Addr().String())
+	m.Cluster, err = etcdserver.NewClusterFromString(clusterName, clusterStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.NewCluster = true
+	m.Transport = newTransport()
+	return m
+}
+
 // Launch starts a member based on ServerConfig, PeerListeners
 // and ClientListeners.
 func (m *member) Launch(t *testing.T) {
@@ -181,7 +267,7 @@ func (m *member) Launch(t *testing.T) {
 		t.Fatalf("failed to initialize the etcd server: %v", err)
 	}
 	m.s.Ticker = time.Tick(tickDuration)
-	m.s.SyncTicker = time.Tick(tickDuration)
+	m.s.SyncTicker = time.Tick(10 * tickDuration)
 	m.s.Start()
 
 	for _, ln := range m.PeerListeners {
@@ -222,4 +308,20 @@ func (m *member) Terminate(t *testing.T) {
 	if err := os.RemoveAll(m.ServerConfig.DataDir); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func mustNewHTTPClient(t *testing.T, eps []string) client.HTTPClient {
+	cc, err := client.NewHTTPClient(newTransport(), eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cc
+}
+
+func newTransport() *http.Transport {
+	tr := &http.Transport{}
+	// TODO: need the support of graceful stop in Sender to remove this
+	tr.DisableKeepAlives = true
+	tr.Dial = (&net.Dialer{Timeout: 100 * time.Millisecond}).Dial
+	return tr
 }

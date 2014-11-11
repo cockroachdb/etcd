@@ -47,21 +47,28 @@ const (
 
 	fallbackFlagExit  = "exit"
 	fallbackFlagProxy = "proxy"
+
+	clusterStateFlagNew      = "new"
+	clusterStateFlagExisting = "existing"
 )
 
 var (
-	fs           = flag.NewFlagSet("etcd", flag.ContinueOnError)
-	name         = fs.String("name", "default", "Unique human-readable name for this node")
-	dir          = fs.String("data-dir", "", "Path to the data directory")
-	durl         = fs.String("discovery", "", "Discovery service used to bootstrap the cluster")
-	snapCount    = fs.Uint64("snapshot-count", etcdserver.DefaultSnapCount, "Number of committed transactions to trigger a snapshot")
-	printVersion = fs.Bool("version", false, "Print the version and exit")
+	fs              = flag.NewFlagSet("etcd", flag.ContinueOnError)
+	name            = fs.String("name", "default", "Unique human-readable name for this node")
+	dir             = fs.String("data-dir", "", "Path to the data directory")
+	durl            = fs.String("discovery", "", "Discovery service used to bootstrap the cluster")
+	dproxy          = fs.String("discovery-proxy", "", "HTTP proxy to use for traffic to discovery service")
+	snapCount       = fs.Uint64("snapshot-count", etcdserver.DefaultSnapCount, "Number of committed transactions to trigger a snapshot")
+	printVersion    = fs.Bool("version", false, "Print the version and exit")
+	forceNewCluster = fs.Bool("force-new-cluster", false, "Force to create a new one member cluster")
 
 	initialCluster      = fs.String("initial-cluster", "default=http://localhost:2380,default=http://localhost:7001", "Initial cluster configuration for bootstrapping")
 	initialClusterToken = fs.String("initial-cluster-token", "etcd-cluster", "Initial cluster token for the etcd cluster during bootstrap")
-	clusterState        = new(etcdserver.ClusterState)
 
-	corsInfo  = &cors.CORSInfo{}
+	corsInfo      = &cors.CORSInfo{}
+	clientTLSInfo = transport.TLSInfo{}
+	peerTLSInfo   = transport.TLSInfo{}
+
 	proxyFlag = flags.NewStringsFlag(
 		proxyFlagOff,
 		proxyFlagReadonly,
@@ -71,9 +78,10 @@ var (
 		fallbackFlagExit,
 		fallbackFlagProxy,
 	)
-
-	clientTLSInfo = transport.TLSInfo{}
-	peerTLSInfo   = transport.TLSInfo{}
+	clusterStateFlag = flags.NewStringsFlag(
+		clusterStateFlagNew,
+		clusterStateFlagExisting,
+	)
 
 	ignored = []string{
 		"cluster-active-size",
@@ -93,10 +101,10 @@ var (
 )
 
 func init() {
-	fs.Var(clusterState, "initial-cluster-state", "Initial cluster configuration for bootstrapping")
-	if err := clusterState.Set(etcdserver.ClusterStateValueNew); err != nil {
+	fs.Var(clusterStateFlag, "initial-cluster-state", "Initial cluster configuration for bootstrapping")
+	if err := clusterStateFlag.Set(clusterStateFlagNew); err != nil {
 		// Should never happen.
-		log.Panicf("unexpected error setting up clusterState: %v", err)
+		log.Panicf("unexpected error setting up clusterStateFlag: %v", err)
 	}
 
 	fs.Var(flags.NewURLsValue("http://localhost:2380,http://localhost:7001"), "initial-advertise-peer-urls", "List of this member's peer URLs to advertise to the rest of the cluster")
@@ -155,9 +163,11 @@ func Main() {
 		os.Exit(0)
 	}
 
-	flags.SetFlagsFromEnv(fs)
+	err := flags.SetFlagsFromEnv(fs)
+	if err != nil {
+		log.Fatalf("etcd: %v", err)
+	}
 
-	var err error
 	shouldProxy := proxyFlag.String() != proxyFlagOff
 	if !shouldProxy {
 		err = startEtcd()
@@ -180,18 +190,18 @@ func Main() {
 func startEtcd() error {
 	cls, err := setupCluster()
 	if err != nil {
-		fmt.Errorf("error setting up initial cluster: %v", err)
+		return fmt.Errorf("error setting up initial cluster: %v", err)
 	}
 
 	if *dir == "" {
 		*dir = fmt.Sprintf("%v.etcd", *name)
-		fmt.Errorf("no data-dir provided, using default data-dir ./%s", *dir)
+		log.Printf("no data-dir provided, using default data-dir ./%s", *dir)
 	}
 	if err := os.MkdirAll(*dir, privateDirMode); err != nil {
-		fmt.Errorf("cannot create data directory: %v", err)
+		return fmt.Errorf("cannot create data directory: %v", err)
 	}
 	if err := fileutil.IsDirWriteable(*dir); err != nil {
-		fmt.Errorf("cannot write to data directory: %v", err)
+		return fmt.Errorf("cannot write to data directory: %v", err)
 	}
 
 	pt, err := transport.NewTransport(peerTLSInfo)
@@ -253,14 +263,16 @@ func startEtcd() error {
 	}
 
 	cfg := &etcdserver.ServerConfig{
-		Name:         *name,
-		ClientURLs:   acurls,
-		DataDir:      *dir,
-		SnapCount:    *snapCount,
-		Cluster:      cls,
-		DiscoveryURL: *durl,
-		ClusterState: *clusterState,
-		Transport:    pt,
+		Name:            *name,
+		ClientURLs:      acurls,
+		DataDir:         *dir,
+		SnapCount:       *snapCount,
+		Cluster:         cls,
+		DiscoveryURL:    *durl,
+		DiscoveryProxy:  *dproxy,
+		NewCluster:      clusterStateFlag.String() == clusterStateFlagNew,
+		ForceNewCluster: *forceNewCluster,
+		Transport:       pt,
 	}
 	var s *etcdserver.EtcdServer
 	s, err = etcdserver.NewServer(cfg)
@@ -297,11 +309,7 @@ func startProxy() error {
 	}
 
 	if *durl != "" {
-		d, err := discovery.ProxyNew(*durl)
-		if err != nil {
-			return fmt.Errorf("cannot init discovery %v", err)
-		}
-		s, err := d.Discover()
+		s, err := discovery.GetCluster(*durl, *dproxy)
 		if err != nil {
 			return err
 		}

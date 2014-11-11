@@ -18,6 +18,7 @@ package raft
 
 import (
 	"fmt"
+	"log"
 
 	pb "github.com/coreos/etcd/raft/raftpb"
 )
@@ -113,10 +114,6 @@ func (l *raftLog) unstableEnts() []pb.Entry {
 	return cpy
 }
 
-func (l *raftLog) resetUnstable() {
-	l.unstable = l.lastIndex() + 1
-}
-
 // nextEnts returns all the available entries for execution.
 // all the returned entries will be marked as applied.
 func (l *raftLog) nextEnts() (ents []pb.Entry) {
@@ -126,10 +123,21 @@ func (l *raftLog) nextEnts() (ents []pb.Entry) {
 	return nil
 }
 
-func (l *raftLog) resetNextEnts() {
-	if l.committed > l.applied {
-		l.applied = l.committed
+func (l *raftLog) appliedTo(i uint64) {
+	if i == 0 {
+		return
 	}
+	if l.committed < i || i < l.applied {
+		log.Panicf("applied[%d] is out of range [prevApplied(%d), committed(%d)]", i, l.applied, l.committed)
+	}
+	l.applied = i
+}
+
+func (l *raftLog) stableTo(i uint64) {
+	if i == 0 {
+		return
+	}
+	l.unstable = i + 1
 }
 
 func (l *raftLog) lastIndex() uint64 { return uint64(len(l.ents)) - 1 + l.offset }
