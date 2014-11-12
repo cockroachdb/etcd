@@ -52,7 +52,7 @@ func TestLeaderUpdateTermFromMessage(t *testing.T) {
 // it immediately reverts to follower state.
 // Reference: section 5.1
 func testUpdateTermFromMessage(t *testing.T, state StateType) {
-	r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+	r := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 	switch state {
 	case StateFollower:
 		r.becomeFollower(1, 2)
@@ -82,7 +82,7 @@ func TestRejectStaleTermMessage(t *testing.T) {
 	fakeStep := func(r *raft, m pb.Message) {
 		called = true
 	}
-	r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+	r := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 	r.step = fakeStep
 	r.loadState(pb.HardState{Term: 2})
 
@@ -96,7 +96,7 @@ func TestRejectStaleTermMessage(t *testing.T) {
 // TestStartAsFollower tests that when servers start up, they begin as followers.
 // Reference: section 5.2
 func TestStartAsFollower(t *testing.T) {
-	r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+	r := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 	if r.state != StateFollower {
 		t.Errorf("state = %s, want %s", r.state, StateFollower)
 	}
@@ -109,7 +109,7 @@ func TestStartAsFollower(t *testing.T) {
 func TestLeaderBcastBeat(t *testing.T) {
 	// heartbeat interval
 	hi := 1
-	r := newRaft(1, []uint64{1, 2, 3}, 10, hi)
+	r := newRaft(1, []uint64{1, 2, 3}, 10, hi, NewMemoryStorage())
 	r.becomeCandidate()
 	r.becomeLeader()
 	for i := 0; i < 10; i++ {
@@ -151,7 +151,7 @@ func TestCandidateStartNewElection(t *testing.T) {
 func testNonleaderStartElection(t *testing.T, state StateType) {
 	// election timeout
 	et := 10
-	r := newRaft(1, []uint64{1, 2, 3}, et, 1)
+	r := newRaft(1, []uint64{1, 2, 3}, et, 1, NewMemoryStorage())
 	switch state {
 	case StateFollower:
 		r.becomeFollower(1, 2)
@@ -215,7 +215,7 @@ func TestLeaderElectionInOneRoundRPC(t *testing.T) {
 		{5, map[uint64]bool{}, StateCandidate},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, idsBySize(tt.size), 10, 1)
+		r := newRaft(1, idsBySize(tt.size), 10, 1, NewMemoryStorage())
 
 		r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
 		for id, vote := range tt.votes {
@@ -248,7 +248,7 @@ func TestFollowerVote(t *testing.T) {
 		{2, 1, true},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+		r := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.loadState(pb.HardState{Term: 1, Vote: tt.vote})
 
 		r.Step(pb.Message{From: tt.nvote, To: 1, Term: 1, Type: pb.MsgVote})
@@ -274,7 +274,7 @@ func TestCandidateFallback(t *testing.T) {
 		{From: 2, To: 1, Term: 2, Type: pb.MsgApp},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+		r := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
 		if r.state != StateCandidate {
 			t.Fatalf("unexpected state = %s, want %s", r.state, StateCandidate)
@@ -303,7 +303,7 @@ func TestCandidateElectionTimeoutRandomized(t *testing.T) {
 // Reference: section 5.2
 func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 	et := 10
-	r := newRaft(1, []uint64{1, 2, 3}, et, 1)
+	r := newRaft(1, []uint64{1, 2, 3}, et, 1, NewMemoryStorage())
 	timeouts := make(map[int]bool)
 	for round := 0; round < 50*et; round++ {
 		switch state {
@@ -345,7 +345,7 @@ func testNonleadersElectionTimeoutNonconflict(t *testing.T, state StateType) {
 	rs := make([]*raft, size)
 	ids := idsBySize(size)
 	for k := range rs {
-		rs[k] = newRaft(ids[k], ids, et, 1)
+		rs[k] = newRaft(ids[k], ids, et, 1, NewMemoryStorage())
 	}
 	conflicts := 0
 	for round := 0; round < 1000; round++ {
@@ -387,10 +387,11 @@ func testNonleadersElectionTimeoutNonconflict(t *testing.T, state StateType) {
 // Also, it writes the new entry into stable storage.
 // Reference: section 5.3
 func TestLeaderStartReplication(t *testing.T) {
-	r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+	s := NewMemoryStorage()
+	r := newRaft(1, []uint64{1, 2, 3}, 10, 1, s)
 	r.becomeCandidate()
 	r.becomeLeader()
-	commitNoopEntry(r)
+	commitNoopEntry(r, s)
 	li := r.raftLog.lastIndex()
 
 	ents := []pb.Entry{{Data: []byte("some data")}}
@@ -412,7 +413,7 @@ func TestLeaderStartReplication(t *testing.T) {
 	if !reflect.DeepEqual(msgs, wmsgs) {
 		t.Errorf("msgs = %+v, want %+v", msgs, wmsgs)
 	}
-	if g := r.raftLog.unstableEnts(); !reflect.DeepEqual(g, wents) {
+	if g := r.raftLog.unstableEntries(); !reflect.DeepEqual(g, wents) {
 		t.Errorf("ents = %+v, want %+v", g, wents)
 	}
 }
@@ -425,10 +426,11 @@ func TestLeaderStartReplication(t *testing.T) {
 // servers eventually find out.
 // Reference: section 5.3
 func TestLeaderCommitEntry(t *testing.T) {
-	r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+	s := NewMemoryStorage()
+	r := newRaft(1, []uint64{1, 2, 3}, 10, 1, s)
 	r.becomeCandidate()
 	r.becomeLeader()
-	commitNoopEntry(r)
+	commitNoopEntry(r, s)
 	li := r.raftLog.lastIndex()
 	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("some data")}}})
 
@@ -478,10 +480,11 @@ func TestLeaderAcknowledgeCommit(t *testing.T) {
 		{5, map[uint64]bool{2: true, 3: true, 4: true, 5: true}, true},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, idsBySize(tt.size), 10, 1)
+		s := NewMemoryStorage()
+		r := newRaft(1, idsBySize(tt.size), 10, 1, s)
 		r.becomeCandidate()
 		r.becomeLeader()
-		commitNoopEntry(r)
+		commitNoopEntry(r, s)
 		li := r.raftLog.lastIndex()
 		r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("some data")}}})
 
@@ -510,8 +513,9 @@ func TestLeaderCommitPrecedingEntries(t *testing.T) {
 		{{Term: 1, Index: 1}},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
-		r.loadEnts(append([]pb.Entry{{}}, tt...))
+		storage := NewMemoryStorage()
+		storage.Append(append([]pb.Entry{{}}, tt...))
+		r := newRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
 		r.loadState(pb.HardState{Term: 2})
 		r.becomeCandidate()
 		r.becomeLeader()
@@ -566,7 +570,7 @@ func TestFollowerCommitEntry(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+		r := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.becomeFollower(1, 2)
 
 		r.Step(pb.Message{From: 2, To: 1, Type: pb.MsgApp, Term: 1, Entries: tt.ents, Commit: tt.commit})
@@ -601,8 +605,9 @@ func TestFollowerCheckMsgApp(t *testing.T) {
 		{3, 3, true},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
-		r.loadEnts(ents)
+		storage := NewMemoryStorage()
+		storage.Append(ents)
+		r := newRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
 		r.loadState(pb.HardState{Commit: 2})
 		r.becomeFollower(2, 2)
 
@@ -656,16 +661,17 @@ func TestFollowerAppendEntries(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
-		r.loadEnts([]pb.Entry{{}, {Term: 1, Index: 1}, {Term: 2, Index: 2}})
+		storage := NewMemoryStorage()
+		storage.Append([]pb.Entry{{}, {Term: 1, Index: 1}, {Term: 2, Index: 2}})
+		r := newRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
 		r.becomeFollower(2, 2)
 
 		r.Step(pb.Message{From: 2, To: 1, Type: pb.MsgApp, Term: 2, LogTerm: tt.term, Index: tt.index, Entries: tt.ents})
 
-		if g := r.raftLog.ents; !reflect.DeepEqual(g, tt.wents) {
+		if g := r.raftLog.allEntries(); !reflect.DeepEqual(g, tt.wents) {
 			t.Errorf("#%d: ents = %+v, want %+v", i, g, tt.wents)
 		}
-		if g := r.raftLog.unstableEnts(); !reflect.DeepEqual(g, tt.wunstable) {
+		if g := r.raftLog.unstableEntries(); !reflect.DeepEqual(g, tt.wunstable) {
 			t.Errorf("#%d: unstableEnts = %+v, want %+v", i, g, tt.wunstable)
 		}
 	}
@@ -724,11 +730,13 @@ func TestLeaderSyncFollowerLog(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		lead := newRaft(1, []uint64{1, 2, 3}, 10, 1)
-		lead.loadEnts(ents)
+		leadStorage := NewMemoryStorage()
+		leadStorage.Append(ents)
+		lead := newRaft(1, []uint64{1, 2, 3}, 10, 1, leadStorage)
 		lead.loadState(pb.HardState{Commit: lead.raftLog.lastIndex(), Term: term})
-		follower := newRaft(2, []uint64{1, 2, 3}, 10, 1)
-		follower.loadEnts(tt)
+		followerStorage := NewMemoryStorage()
+		followerStorage.Append(tt)
+		follower := newRaft(2, []uint64{1, 2, 3}, 10, 1, followerStorage)
 		follower.loadState(pb.HardState{Term: term - 1})
 		// It is necessary to have a three-node cluster.
 		// The second may have more up-to-date log than the first one, so the
@@ -757,7 +765,7 @@ func TestVoteRequest(t *testing.T) {
 		{[]pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}}, 3},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2, 3}, 10, 1)
+		r := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.Step(pb.Message{
 			From: 2, To: 1, Type: pb.MsgApp, Term: tt.wterm - 1, LogTerm: 0, Index: 0, Entries: tt.ents,
 		})
@@ -818,8 +826,9 @@ func TestVoter(t *testing.T) {
 		{[]pb.Entry{{}, {Term: 2, Index: 1}, {Term: 1, Index: 2}}, 1, 1, true},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2}, 10, 1)
-		r.loadEnts(tt.ents)
+		storage := NewMemoryStorage()
+		storage.Append(tt.ents)
+		r := newRaft(1, []uint64{1, 2}, 10, 1, storage)
 
 		r.Step(pb.Message{From: 2, To: 1, Type: pb.MsgVote, Term: 3, LogTerm: tt.logterm, Index: tt.index})
 
@@ -853,8 +862,9 @@ func TestLeaderOnlyCommitsLogFromCurrentTerm(t *testing.T) {
 		{3, 3},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2}, 10, 1)
-		r.loadEnts(ents)
+		storage := NewMemoryStorage()
+		storage.Append(ents)
+		r := newRaft(1, []uint64{1, 2}, 10, 1, storage)
 		r.loadState(pb.HardState{Term: 2})
 		// become leader at term 3
 		r.becomeCandidate()
@@ -876,7 +886,7 @@ func (s messageSlice) Len() int           { return len(s) }
 func (s messageSlice) Less(i, j int) bool { return fmt.Sprint(s[i]) < fmt.Sprint(s[j]) }
 func (s messageSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
-func commitNoopEntry(r *raft) {
+func commitNoopEntry(r *raft, s *MemoryStorage) {
 	if r.state != StateLeader {
 		panic("it should only be used when it is the leader")
 	}
@@ -891,6 +901,7 @@ func commitNoopEntry(r *raft) {
 	}
 	// ignore further messages to refresh followers' commmit index
 	r.readMessages()
+	s.Append(r.raftLog.unstableEntries())
 	r.raftLog.appliedTo(r.raftLog.committed)
 	r.raftLog.stableTo(r.raftLog.lastIndex())
 }

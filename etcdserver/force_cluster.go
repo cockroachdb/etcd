@@ -28,7 +28,7 @@ import (
 	"github.com/coreos/etcd/wal"
 )
 
-func restartAsStandaloneNode(cfg *ServerConfig, index uint64, snapshot *raftpb.Snapshot) (types.ID, raft.Node, *wal.WAL) {
+func restartAsStandaloneNode(cfg *ServerConfig, index uint64, snapshot *raftpb.Snapshot) (types.ID, raft.Node, *raft.MemoryStorage, *wal.WAL) {
 	w, id, cid, st, ents := readWAL(cfg.WALDir(), index)
 	cfg.Cluster.SetID(cid)
 
@@ -53,8 +53,10 @@ func restartAsStandaloneNode(cfg *ServerConfig, index uint64, snapshot *raftpb.S
 	}
 
 	log.Printf("etcdserver: forcing restart of member %s in cluster %s at commit index %d", id, cfg.Cluster.ID(), st.Commit)
-	n := raft.RestartNode(uint64(id), 10, 1, snapshot, st, ents)
-	return id, n, w
+	s := raft.NewMemoryStorage()
+	s.Append(ents)
+	n := raft.RestartNode(uint64(id), 10, 1, snapshot, st, s)
+	return id, n, s, w
 }
 
 // getIDs returns an ordered set of IDs included in the given snapshot and

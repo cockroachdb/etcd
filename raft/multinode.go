@@ -7,13 +7,14 @@ import (
 
 // MultiNode represents a node that is participating in multiple consensus groups.
 type MultiNode interface {
-	CreateGroup(group uint64, peers []Peer) error
+	CreateGroup(group uint64, peers []Peer, storage Storage) error
 	Tick()
 	Propose(ctx context.Context, group uint64, data []byte) error
 	ProposeConfChange(ctx context.Context, group uint64, cc pb.ConfChange) error
 	ApplyConfChange(group uint64, cc pb.ConfChange)
 	Step(ctx context.Context, group uint64, msg pb.Message) error
 	Ready() <-chan map[uint64]Ready
+	Advance(map[uint64]Ready)
 	Stop()
 	// TODO: Add Compact. Is Campaign necessary?
 }
@@ -37,8 +38,9 @@ type multiConfChange struct {
 }
 
 type groupCreation struct {
-	id    uint64
-	peers []Peer
+	id      uint64
+	peers   []Peer
+	storage Storage
 	// TODO(bdarnell): do we really need the done channel here? It's
 	// unlike the rest of this package, but we need the group creation
 	// to be complete before any Propose or other calls.
@@ -54,6 +56,7 @@ type multiNode struct {
 	recvc     chan multiMessage
 	confc     chan multiConfChange
 	readyc    chan map[uint64]Ready
+	advancec  chan map[uint64]Ready
 	tickc     chan struct{}
 	done      chan struct{}
 }
@@ -68,6 +71,7 @@ func newMultiNode(id uint64, election, heartbeat int) multiNode {
 		recvc:     make(chan multiMessage),
 		confc:     make(chan multiConfChange),
 		readyc:    make(chan map[uint64]Ready),
+		advancec:  make(chan map[uint64]Ready),
 		tickc:     make(chan struct{}),
 		done:      make(chan struct{}),
 	}
@@ -116,7 +120,7 @@ func (mn *multiNode) run() {
 		var group *groupState
 		select {
 		case gc := <-mn.groupc:
-			r := newRaft(mn.id, nil, mn.election, mn.heartbeat)
+			r := newRaft(mn.id, nil, mn.election, mn.heartbeat, gc.storage)
 			group = &groupState{
 				id:         gc.id,
 				raft:       r,
@@ -169,10 +173,13 @@ func (mn *multiNode) run() {
 				}
 			}
 		case readyc <- rds:
-			for group, rd := range rds {
+			rds = map[uint64]Ready{}
+
+		case advs := <-mn.advancec:
+			for group, rd := range advs {
 				groups[group].commitReady(rd)
 			}
-			rds = map[uint64]Ready{}
+
 		case <-mn.done:
 			return
 		}
@@ -185,11 +192,12 @@ func (mn *multiNode) run() {
 	}
 }
 
-func (mn *multiNode) CreateGroup(id uint64, peers []Peer) error {
+func (mn *multiNode) CreateGroup(id uint64, peers []Peer, storage Storage) error {
 	gc := groupCreation{
-		id:    id,
-		peers: peers,
-		done:  make(chan struct{}),
+		id:      id,
+		peers:   peers,
+		storage: storage,
+		done:    make(chan struct{}),
 	}
 	mn.groupc <- gc
 	select {
@@ -269,4 +277,8 @@ func (mn *multiNode) Step(ctx context.Context, group uint64, m pb.Message) error
 
 func (mn *multiNode) Ready() <-chan map[uint64]Ready {
 	return mn.readyc
+}
+
+func (mn *multiNode) Advance(rds map[uint64]Ready) {
+	mn.advancec <- rds
 }
