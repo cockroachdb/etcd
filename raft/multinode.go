@@ -14,6 +14,7 @@ type MultiNode interface {
 	ApplyConfChange(group uint64, cc pb.ConfChange)
 	Step(ctx context.Context, group uint64, msg pb.Message) error
 	Ready() <-chan map[uint64]Ready
+	Advance()
 	Stop()
 	// TODO: Add Compact. Is Campaign necessary?
 }
@@ -55,6 +56,7 @@ type multiNode struct {
 	recvc     chan multiMessage
 	confc     chan multiConfChange
 	readyc    chan map[uint64]Ready
+	advancec  chan struct{}
 	tickc     chan struct{}
 	done      chan struct{}
 }
@@ -69,6 +71,7 @@ func newMultiNode(id uint64, election, heartbeat int) multiNode {
 		recvc:     make(chan multiMessage),
 		confc:     make(chan multiConfChange),
 		readyc:    make(chan map[uint64]Ready),
+		advancec:  make(chan struct{}),
 		tickc:     make(chan struct{}),
 		done:      make(chan struct{}),
 	}
@@ -108,9 +111,10 @@ func (g *groupState) commitReady(rd Ready) {
 func (mn *multiNode) run() {
 	groups := map[uint64]*groupState{}
 	rds := map[uint64]Ready{}
+	var advancec chan struct{}
 	for {
 		readyc := mn.readyc
-		if len(rds) == 0 {
+		if len(rds) == 0 || advancec != nil {
 			readyc = nil
 		}
 
@@ -174,10 +178,13 @@ func (mn *multiNode) run() {
 				}
 			}
 		case readyc <- rds:
+			advancec = mn.advancec
+		case <-advancec:
 			for group, rd := range rds {
 				groups[group].commitReady(rd)
 			}
 			rds = map[uint64]Ready{}
+			advancec = nil
 		case <-mn.done:
 			return
 		}
@@ -275,4 +282,11 @@ func (mn *multiNode) Step(ctx context.Context, group uint64, m pb.Message) error
 
 func (mn *multiNode) Ready() <-chan map[uint64]Ready {
 	return mn.readyc
+}
+
+func (mn *multiNode) Advance() {
+	select {
+	case mn.advancec <- struct{}{}:
+	case <-mn.done:
+	}
 }
