@@ -59,16 +59,34 @@ type progress struct {
 }
 
 func (pr *progress) update(n uint64) {
-	pr.match = n
+	if pr.match < n {
+		pr.match = n
+	}
+	if pr.next < n+1 {
+		pr.next = n + 1
+	}
+}
+
+func (pr *progress) optimisticUpdate(n uint64) {
 	pr.next = n + 1
 }
 
 // maybeDecrTo returns false if the given to index comes from an out of order message.
 // Otherwise it decreases the progress next index and returns true.
 func (pr *progress) maybeDecrTo(to uint64) bool {
-	// the rejection must be stale if the progress has matched with
-	// follower or "to" does not match next - 1
-	if pr.match != 0 || pr.next-1 != to {
+	if pr.match != 0 {
+		// the rejection must be stale if the progress has matched and "to"
+		// is smaller than "match".
+		if to <= pr.match {
+			return false
+		}
+		// directly decrease next to match + 1
+		pr.next = pr.match + 1
+		return true
+	}
+
+	// the rejection must be stale if "to" does not match next - 1
+	if pr.next-1 != to {
 		return false
 	}
 
@@ -81,13 +99,6 @@ func (pr *progress) maybeDecrTo(to uint64) bool {
 func (pr *progress) String() string {
 	return fmt.Sprintf("n=%d m=%d", pr.next, pr.match)
 }
-
-// uint64Slice implements sort interface
-type uint64Slice []uint64
-
-func (p uint64Slice) Len() int           { return len(p) }
-func (p uint64Slice) Less(i, j int) bool { return p[i] < p[j] }
-func (p uint64Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 type raft struct {
 	pb.HardState
@@ -119,27 +130,46 @@ type raft struct {
 	step             stepFunc
 }
 
-func newRaft(id uint64, peers []uint64, election, heartbeat int) *raft {
+func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage) *raft {
 	if id == None {
 		panic("cannot use none id")
+	}
+	log := newLog(storage)
+	hs, cs, err := storage.InitialState()
+	if err != nil {
+		panic(err) // TODO(bdarnell)
+	}
+	if len(cs.Nodes) > 0 {
+		if len(peers) > 0 {
+			// TODO(bdarnell): the peers argument is always nil except in
+			// tests; the argument should be removed and these tests should be
+			// updated to specify their nodes through a snapshot.
+			panic("cannot specify both newRaft(peers) and ConfState.Nodes)")
+		}
+		peers = cs.Nodes
 	}
 	r := &raft{
 		id:               id,
 		lead:             None,
-		raftLog:          newLog(),
+		raftLog:          log,
 		prs:              make(map[uint64]*progress),
 		electionTimeout:  election,
 		heartbeatTimeout: heartbeat,
 	}
 	r.rand = rand.New(rand.NewSource(int64(id)))
 	for _, p := range peers {
-		r.prs[p] = &progress{}
+		r.prs[p] = &progress{next: 1}
 	}
-	r.becomeFollower(0, None)
+	if !isHardStateEqual(hs, emptyState) {
+		r.loadState(hs)
+	}
+	r.becomeFollower(r.Term, None)
 	return r
 }
 
 func (r *raft) hasLeader() bool { return r.lead != None }
+
+func (r *raft) leader() uint64 { return r.lead }
 
 func (r *raft) softState() *SoftState {
 	return &SoftState{Lead: r.lead, RaftState: r.state, Nodes: r.nodes()}
@@ -187,24 +217,44 @@ func (r *raft) sendAppend(to uint64) {
 	pr := r.prs[to]
 	m := pb.Message{}
 	m.To = to
-	m.Index = pr.next - 1
-	if r.needSnapshot(m.Index) {
+	if r.needSnapshot(pr.next) {
 		m.Type = pb.MsgSnap
-		m.Snapshot = r.raftLog.snapshot
+		snapshot, err := r.raftLog.snapshot()
+		if err != nil {
+			panic(err) // TODO(bdarnell)
+		}
+		if IsEmptySnap(snapshot) {
+			panic("need non-empty snapshot")
+		}
+		m.Snapshot = snapshot
 	} else {
 		m.Type = pb.MsgApp
+		m.Index = pr.next - 1
 		m.LogTerm = r.raftLog.term(pr.next - 1)
 		m.Entries = r.raftLog.entries(pr.next)
 		m.Commit = r.raftLog.committed
+		// optimistically increase the next if the follower
+		// has been matched.
+		if n := len(m.Entries); pr.match != 0 && n != 0 {
+			pr.optimisticUpdate(m.Entries[n-1].Index)
+		}
 	}
 	r.send(m)
 }
 
 // sendHeartbeat sends an empty MsgApp
 func (r *raft) sendHeartbeat(to uint64) {
+	// Attach the commit as min(to.matched, r.committed).
+	// When the leader sends out heartbeat message,
+	// the receiver(follower) might not be matched with the leader
+	// or it might not have all the committed entries.
+	// The leader MUST NOT forward the follower's commit to
+	// an unmatched index.
+	commit := min(r.prs[to].match, r.raftLog.committed)
 	m := pb.Message{
-		To:   to,
-		Type: pb.MsgApp,
+		To:     to,
+		Type:   pb.MsgApp,
+		Commit: commit,
 	}
 	r.send(m)
 }
@@ -379,6 +429,10 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 	}
 }
 
+func (r *raft) handleHeartbeat(m pb.Message) {
+	r.raftLog.commitTo(m.Commit)
+}
+
 func (r *raft) handleSnapshot(m pb.Message) {
 	if r.restore(m.Snapshot) {
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()})
@@ -387,9 +441,7 @@ func (r *raft) handleSnapshot(m pb.Message) {
 	}
 }
 
-func (r *raft) resetPendingConf() {
-	r.pendingConf = false
-}
+func (r *raft) resetPendingConf() { r.pendingConf = false }
 
 func (r *raft) addNode(id uint64) {
 	r.setProgress(id, 0, r.raftLog.lastIndex()+1)
@@ -474,7 +526,11 @@ func stepFollower(r *raft, m pb.Message) {
 	case pb.MsgApp:
 		r.elapsed = 0
 		r.lead = m.From
-		r.handleAppendEntries(m)
+		if m.LogTerm == 0 && m.Index == 0 && len(m.Entries) == 0 {
+			r.handleHeartbeat(m)
+		} else {
+			r.handleAppendEntries(m)
+		}
 	case pb.MsgSnap:
 		r.elapsed = 0
 		r.handleSnapshot(m)
@@ -489,24 +545,16 @@ func stepFollower(r *raft, m pb.Message) {
 	}
 }
 
-func (r *raft) compact(index uint64, nodes []uint64, d []byte) {
-	if index > r.raftLog.applied {
-		panic(fmt.Sprintf("raft: compact index (%d) exceeds applied index (%d)", index, r.raftLog.applied))
-	}
-	r.raftLog.snap(d, index, r.raftLog.term(index), nodes)
-	r.raftLog.compact(index)
-}
-
 // restore recovers the statemachine from a snapshot. It restores the log and the
 // configuration of statemachine.
 func (r *raft) restore(s pb.Snapshot) bool {
-	if s.Index <= r.raftLog.committed {
+	if s.Metadata.Index <= r.raftLog.committed {
 		return false
 	}
 
 	r.raftLog.restore(s)
 	r.prs = make(map[uint64]*progress)
-	for _, n := range s.Nodes {
+	for _, n := range s.Metadata.ConfState.Nodes {
 		if n == r.id {
 			r.setProgress(n, r.raftLog.lastIndex(), r.raftLog.lastIndex()+1)
 		} else {
@@ -517,13 +565,7 @@ func (r *raft) restore(s pb.Snapshot) bool {
 }
 
 func (r *raft) needSnapshot(i uint64) bool {
-	if i < r.raftLog.offset {
-		if r.raftLog.snapshot.Term == 0 {
-			panic("need non-empty snapshot")
-		}
-		return true
-	}
-	return false
+	return i < r.raftLog.firstIndex()
 }
 
 func (r *raft) nodes() []uint64 {
@@ -531,6 +573,7 @@ func (r *raft) nodes() []uint64 {
 	for k := range r.prs {
 		nodes = append(nodes, k)
 	}
+	sort.Sort(uint64Slice(nodes))
 	return nodes
 }
 
@@ -547,10 +590,6 @@ func (r *raft) delProgress(id uint64) {
 func (r *raft) promotable() bool {
 	_, ok := r.prs[r.id]
 	return ok
-}
-
-func (r *raft) loadEnts(ents []pb.Entry) {
-	r.raftLog.load(ents)
 }
 
 func (r *raft) loadState(state pb.HardState) {

@@ -22,6 +22,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/coreos/etcd/pkg/transport"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/proxy"
+	"github.com/coreos/etcd/rafthttp"
 	"github.com/coreos/etcd/version"
 )
 
@@ -169,8 +171,9 @@ func Main() {
 	}
 
 	shouldProxy := proxyFlag.String() != proxyFlagOff
+	var stopped <-chan struct{}
 	if !shouldProxy {
-		err = startEtcd()
+		stopped, err = startEtcd()
 		if err == discovery.ErrFullCluster && fallbackFlag.String() == fallbackFlagProxy {
 			log.Printf("etcd: discovery cluster full, falling back to %s", fallbackFlagProxy)
 			shouldProxy = true
@@ -182,15 +185,18 @@ func Main() {
 	if err != nil {
 		log.Fatalf("etcd: %v", err)
 	}
-	// Block indefinitely
-	<-make(chan struct{})
+	<-stopped
 }
 
 // startEtcd launches the etcd server and HTTP handlers for client/server communication.
-func startEtcd() error {
-	cls, err := setupCluster()
+func startEtcd() (<-chan struct{}, error) {
+	apurls, err := flags.URLsFromFlags(fs, "initial-advertise-peer-urls", "addr", peerTLSInfo)
 	if err != nil {
-		return fmt.Errorf("error setting up initial cluster: %v", err)
+		return nil, err
+	}
+	cls, err := setupCluster(apurls)
+	if err != nil {
+		return nil, fmt.Errorf("error setting up initial cluster: %v", err)
 	}
 
 	if *dir == "" {
@@ -198,33 +204,36 @@ func startEtcd() error {
 		log.Printf("no data-dir provided, using default data-dir ./%s", *dir)
 	}
 	if err := os.MkdirAll(*dir, privateDirMode); err != nil {
-		return fmt.Errorf("cannot create data directory: %v", err)
+		return nil, fmt.Errorf("cannot create data directory: %v", err)
 	}
 	if err := fileutil.IsDirWriteable(*dir); err != nil {
-		return fmt.Errorf("cannot write to data directory: %v", err)
+		return nil, fmt.Errorf("cannot write to data directory: %v", err)
 	}
 
-	pt, err := transport.NewTransport(peerTLSInfo)
+	pt, err := transport.NewTimeoutTransport(peerTLSInfo, rafthttp.ConnReadTimeout, rafthttp.ConnWriteTimeout)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	acurls, err := flags.URLsFromFlags(fs, "advertise-client-urls", "addr", clientTLSInfo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	lpurls, err := flags.URLsFromFlags(fs, "listen-peer-urls", "peer-bind-addr", peerTLSInfo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	if !peerTLSInfo.Empty() {
+		log.Printf("etcd: peerTLS: %s", peerTLSInfo)
+	}
 	plns := make([]net.Listener, 0)
 	for _, u := range lpurls {
 		var l net.Listener
-		l, err = transport.NewListener(u.Host, peerTLSInfo)
+		l, err = transport.NewTimeoutListener(u.Host, u.Scheme, peerTLSInfo, rafthttp.ConnReadTimeout, rafthttp.ConnWriteTimeout)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		urlStr := u.String()
@@ -240,15 +249,18 @@ func startEtcd() error {
 
 	lcurls, err := flags.URLsFromFlags(fs, "listen-client-urls", "bind-addr", clientTLSInfo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	if !clientTLSInfo.Empty() {
+		log.Printf("etcd: clientTLS: %s", clientTLSInfo)
+	}
 	clns := make([]net.Listener, 0)
 	for _, u := range lcurls {
 		var l net.Listener
-		l, err = transport.NewListener(u.Host, clientTLSInfo)
+		l, err = transport.NewListener(u.Host, u.Scheme, clientTLSInfo)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		urlStr := u.String()
@@ -265,6 +277,7 @@ func startEtcd() error {
 	cfg := &etcdserver.ServerConfig{
 		Name:            *name,
 		ClientURLs:      acurls,
+		PeerURLs:        apurls,
 		DataDir:         *dir,
 		SnapCount:       *snapCount,
 		Cluster:         cls,
@@ -277,10 +290,13 @@ func startEtcd() error {
 	var s *etcdserver.EtcdServer
 	s, err = etcdserver.NewServer(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.Start()
 
+	if corsInfo.String() != "" {
+		log.Printf("etcd: cors = %s", corsInfo)
+	}
 	ch := &cors.CORSHandler{
 		Handler: etcdhttp.NewClientHandler(s),
 		Info:    corsInfo,
@@ -298,12 +314,16 @@ func startEtcd() error {
 			log.Fatal(http.Serve(l, ch))
 		}(l)
 	}
-	return nil
+	return s.StopNotify(), nil
 }
 
 // startProxy launches an HTTP proxy for client communication which proxies to other etcd nodes.
 func startProxy() error {
-	cls, err := setupCluster()
+	apurls, err := flags.URLsFromFlags(fs, "initial-advertise-peer-urls", "addr", peerTLSInfo)
+	if err != nil {
+		return err
+	}
+	cls, err := setupCluster(apurls)
 	if err != nil {
 		return fmt.Errorf("error setting up initial cluster: %v", err)
 	}
@@ -349,7 +369,7 @@ func startProxy() error {
 	}
 	// Start a proxy server goroutine for each listen address
 	for _, u := range lcurls {
-		l, err := transport.NewListener(u.Host, clientTLSInfo)
+		l, err := transport.NewListener(u.Host, u.Scheme, clientTLSInfo)
 		if err != nil {
 			return err
 		}
@@ -363,8 +383,8 @@ func startProxy() error {
 	return nil
 }
 
-// setupCluster sets up the cluster definition for bootstrap or discovery.
-func setupCluster() (*etcdserver.Cluster, error) {
+// setupCluster sets up an initial cluster definition for bootstrap or discovery.
+func setupCluster(apurls []url.URL) (*etcdserver.Cluster, error) {
 	set := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
 		set[f.Name] = true
@@ -372,21 +392,18 @@ func setupCluster() (*etcdserver.Cluster, error) {
 	if set["discovery"] && set["initial-cluster"] {
 		return nil, fmt.Errorf("both discovery and bootstrap-config are set")
 	}
-	apurls, err := flags.URLsFromFlags(fs, "initial-advertise-peer-urls", "addr", peerTLSInfo)
-	if err != nil {
-		return nil, err
-	}
-
 	var cls *etcdserver.Cluster
+	var err error
 	switch {
 	case set["discovery"]:
+		// If using discovery, generate a temporary cluster based on
+		// self's advertised peer URLs
 		clusterStr := genClusterString(*name, apurls)
 		cls, err = etcdserver.NewClusterFromString(*durl, clusterStr)
 	case set["initial-cluster"]:
 		fallthrough
 	default:
 		// We're statically configured, and cluster has appropriately been set.
-		// Try to configure by indexing the static cluster by name.
 		cls, err = etcdserver.NewClusterFromString(*initialClusterToken, *initialCluster)
 	}
 	return cls, err

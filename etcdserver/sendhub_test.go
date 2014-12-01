@@ -17,21 +17,25 @@
 package etcdserver
 
 import (
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/coreos/etcd/etcdserver/stats"
+	"github.com/coreos/etcd/pkg/testutil"
 	"github.com/coreos/etcd/pkg/types"
+	"github.com/coreos/etcd/raft/raftpb"
 )
 
 func TestSendHubInitSenders(t *testing.T) {
-	membs := []Member{
+	membs := []*Member{
 		newTestMember(1, []string{"http://a"}, "", nil),
 		newTestMember(2, []string{"http://b"}, "", nil),
 		newTestMember(3, []string{"http://c"}, "", nil),
 	}
 	cl := newTestCluster(membs)
 	ls := stats.NewLeaderStats("")
-	h := newSendHub(nil, cl, nil, ls)
+	h := newSendHub(nil, cl, nil, nil, ls)
 
 	ids := cl.MemberIDs()
 	if len(h.senders) != len(ids) {
@@ -47,8 +51,8 @@ func TestSendHubInitSenders(t *testing.T) {
 func TestSendHubAdd(t *testing.T) {
 	cl := newTestCluster(nil)
 	ls := stats.NewLeaderStats("")
-	h := newSendHub(nil, cl, nil, ls)
-	m := newTestMemberp(1, []string{"http://a"}, "", nil)
+	h := newSendHub(nil, cl, nil, nil, ls)
+	m := newTestMember(1, []string{"http://a"}, "", nil)
 	h.Add(m)
 
 	if _, ok := ls.Followers["1"]; !ok {
@@ -57,9 +61,6 @@ func TestSendHubAdd(t *testing.T) {
 	s, ok := h.senders[types.ID(1)]
 	if !ok {
 		t.Fatalf("senders[1] is nil, want exists")
-	}
-	if s.u != "http://a/raft" {
-		t.Errorf("url = %s, want %s", s.u, "http://a/raft")
 	}
 
 	h.Add(m)
@@ -70,15 +71,57 @@ func TestSendHubAdd(t *testing.T) {
 }
 
 func TestSendHubRemove(t *testing.T) {
-	membs := []Member{
+	membs := []*Member{
 		newTestMember(1, []string{"http://a"}, "", nil),
 	}
 	cl := newTestCluster(membs)
 	ls := stats.NewLeaderStats("")
-	h := newSendHub(nil, cl, nil, ls)
+	h := newSendHub(nil, cl, nil, nil, ls)
 	h.Remove(types.ID(1))
 
 	if _, ok := h.senders[types.ID(1)]; ok {
 		t.Fatalf("senders[1] exists, want removed")
 	}
 }
+
+func TestSendHubShouldStop(t *testing.T) {
+	membs := []*Member{
+		newTestMember(1, []string{"http://a"}, "", nil),
+	}
+	tr := newRespRoundTripper(http.StatusForbidden, nil)
+	cl := newTestCluster(membs)
+	ls := stats.NewLeaderStats("")
+	h := newSendHub(tr, cl, nil, nil, ls)
+
+	shouldstop := h.ShouldStopNotify()
+	select {
+	case <-shouldstop:
+		t.Fatalf("received unexpected shouldstop notification")
+	case <-time.After(10 * time.Millisecond):
+	}
+	h.senders[1].Send(raftpb.Message{})
+
+	testutil.ForceGosched()
+	select {
+	case <-shouldstop:
+	default:
+		t.Fatalf("cannot receive stop notification")
+	}
+}
+
+type respRoundTripper struct {
+	code int
+	err  error
+}
+
+func newRespRoundTripper(code int, err error) *respRoundTripper {
+	return &respRoundTripper{code: code, err: err}
+}
+func (t *respRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: t.code, Body: &nopReadCloser{}}, t.err
+}
+
+type nopReadCloser struct{}
+
+func (n *nopReadCloser) Read(p []byte) (int, error) { return 0, nil }
+func (n *nopReadCloser) Close() error               { return nil }
