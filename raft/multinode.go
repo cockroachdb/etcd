@@ -1,13 +1,13 @@
 package raft
 
 import (
-	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
+	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	pb "github.com/coreos/etcd/raft/raftpb"
 )
 
 // MultiNode represents a node that is participating in multiple consensus groups.
 type MultiNode interface {
-	CreateGroup(group uint64, peers []Peer) error
+	CreateGroup(group uint64, peers []Peer, storage Storage) error
 	Tick()
 	Propose(ctx context.Context, group uint64, data []byte) error
 	ProposeConfChange(ctx context.Context, group uint64, cc pb.ConfChange) error
@@ -37,8 +37,9 @@ type multiConfChange struct {
 }
 
 type groupCreation struct {
-	id    uint64
-	peers []Peer
+	id      uint64
+	peers   []Peer
+	storage Storage
 	// TODO(bdarnell): do we really need the done channel here? It's
 	// unlike the rest of this package, but we need the group creation
 	// to be complete before any Propose or other calls.
@@ -82,7 +83,7 @@ type groupState struct {
 }
 
 func (g *groupState) newReady() Ready {
-	return newReady(g.raft, g.prevSoftSt, g.prevHardSt, g.prevSnapi)
+	return newReady(g.raft, g.prevSoftSt, g.prevHardSt)
 }
 
 func (g *groupState) commitReady(rd Ready) {
@@ -93,7 +94,7 @@ func (g *groupState) commitReady(rd Ready) {
 		g.prevHardSt = rd.HardState
 	}
 	if !IsEmptySnap(rd.Snapshot) {
-		g.prevSnapi = rd.Snapshot.Index
+		g.prevSnapi = rd.Snapshot.Metadata.Index
 	}
 	if len(rd.Entries) > 0 {
 		// TODO(bdarnell): stableTo(rd.Snapshot.Index) if any
@@ -116,13 +117,17 @@ func (mn *multiNode) run() {
 		var group *groupState
 		select {
 		case gc := <-mn.groupc:
-			r := newRaft(mn.id, nil, mn.election, mn.heartbeat)
+			r := newRaft(mn.id, nil, mn.election, mn.heartbeat, gc.storage)
+			snap, err := r.raftLog.snapshot()
+			if err != nil {
+				panic(err) // TODO(bdarnell)
+			}
 			group = &groupState{
 				id:         gc.id,
 				raft:       r,
 				prevSoftSt: r.softState(),
 				prevHardSt: r.HardState,
-				prevSnapi:  r.raftLog.snapshot.Index,
+				prevSnapi:  snap.Metadata.Index,
 			}
 			groups[gc.id] = group
 			ents := make([]pb.Entry, len(gc.peers))
@@ -185,11 +190,12 @@ func (mn *multiNode) run() {
 	}
 }
 
-func (mn *multiNode) CreateGroup(id uint64, peers []Peer) error {
+func (mn *multiNode) CreateGroup(id uint64, peers []Peer, storage Storage) error {
 	gc := groupCreation{
-		id:    id,
-		peers: peers,
-		done:  make(chan struct{}),
+		id:      id,
+		peers:   peers,
+		storage: storage,
+		done:    make(chan struct{}),
 	}
 	mn.groupc <- gc
 	select {
