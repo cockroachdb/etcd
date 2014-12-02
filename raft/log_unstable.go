@@ -77,13 +77,18 @@ func (u *unstable) maybeTerm(i uint64) (uint64, bool) {
 	return u.entries[i-u.offset].Term, true
 }
 
-func (u *unstable) stableTo(i uint64) {
-	if i < u.offset || i+1-u.offset > uint64(len(u.entries)) {
-		log.Panicf("stableTo(%d) is out of range [unstable(%d), len(unstableEnts)(%d)]",
-			i, u.offset, len(u.entries))
+func (u *unstable) stableTo(i, t uint64) {
+	gt, ok := u.maybeTerm(i)
+	if !ok {
+		return
 	}
-	u.entries = u.entries[i+1-u.offset:]
-	u.offset = i + 1
+	// if i < offest, term is matched with the snapshot
+	// only update the unstalbe entries if term is matched with
+	// an unstable entry.
+	if gt == t && i >= u.offset {
+		u.entries = u.entries[i+1-u.offset:]
+		u.offset = i + 1
+	}
 }
 
 func (u *unstable) stableSnapTo(i uint64) {
@@ -98,18 +103,26 @@ func (u *unstable) restore(s pb.Snapshot) {
 	u.snapshot = &s
 }
 
-func (u *unstable) resetEntries(offset uint64) {
-	u.entries = nil
-	u.offset = offset
-}
-
-func (u *unstable) truncateAndAppend(after uint64, ents []pb.Entry) {
-	if after < u.offset {
-		// The log is being truncated to before our current unstable
-		// portion, so discard it and reset unstable.
-		u.resetEntries(after + 1)
+func (u *unstable) truncateAndAppend(ents []pb.Entry) {
+	after := ents[0].Index - 1
+	switch {
+	case after < u.offset:
+		log.Printf("raftlog: replace the unstable entries from index %d", after+1)
+		// The log is being truncated to before our current offset
+		// portion, so set the offset and replace the entries
+		u.offset = after + 1
+		u.entries = ents
+	case after == u.offset+uint64(len(u.entries))-1:
+		// after is the last index in the u.entries
+		// directly append
+		u.entries = append(u.entries, ents...)
+	default:
+		// truncate to after and copy to u.entries
+		// then append
+		log.Printf("raftlog: truncate the unstable entries to index %d", after)
+		u.entries = append([]pb.Entry{}, u.slice(u.offset, after+1)...)
+		u.entries = append(u.entries, ents...)
 	}
-	u.entries = append(u.slice(u.offset, after+1), ents...)
 }
 
 func (u *unstable) slice(lo uint64, hi uint64) []pb.Entry {

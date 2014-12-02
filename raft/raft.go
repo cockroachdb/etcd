@@ -19,6 +19,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"sort"
 
@@ -189,6 +190,11 @@ func (r *raft) String() string {
 }
 
 func (r *raft) poll(id uint64, v bool) (granted int) {
+	if v {
+		log.Printf("raft: %x received vote from %x at term %x", r.id, id, r.Term)
+	} else {
+		log.Printf("raft: %x received vote rejection from %x at term %x", r.id, id, r.Term)
+	}
 	if _, ok := r.votes[id]; !ok {
 		r.votes[id] = v
 	}
@@ -227,6 +233,9 @@ func (r *raft) sendAppend(to uint64) {
 			panic("need non-empty snapshot")
 		}
 		m.Snapshot = snapshot
+		sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term
+		log.Printf("raft: %x [firstindex: %d, commit: %d] sent snapshot[index: %d, term: %d] to %x [match: %d, next: %d]",
+			r.id, r.raftLog.firstIndex(), r.Commit, to, sindex, sterm, pr.match, pr.next)
 	} else {
 		m.Type = pb.MsgApp
 		m.Index = pr.next - 1
@@ -314,7 +323,7 @@ func (r *raft) q() int {
 func (r *raft) appendEntry(e pb.Entry) {
 	e.Term = r.Term
 	e.Index = r.raftLog.lastIndex() + 1
-	r.raftLog.append(r.raftLog.lastIndex(), e)
+	r.raftLog.append(e)
 	r.prs[r.id].update(r.raftLog.lastIndex())
 	r.maybeCommit()
 }
@@ -347,6 +356,7 @@ func (r *raft) becomeFollower(term uint64, lead uint64) {
 	r.tick = r.tickElection
 	r.lead = lead
 	r.state = StateFollower
+	log.Printf("raft: %x became follower at term %d", r.id, r.Term)
 }
 
 func (r *raft) becomeCandidate() {
@@ -359,6 +369,7 @@ func (r *raft) becomeCandidate() {
 	r.tick = r.tickElection
 	r.Vote = r.id
 	r.state = StateCandidate
+	log.Printf("raft: %x became candidate at term %d", r.id, r.Term)
 }
 
 func (r *raft) becomeLeader() {
@@ -381,6 +392,7 @@ func (r *raft) becomeLeader() {
 		r.pendingConf = true
 	}
 	r.appendEntry(pb.Entry{Data: nil})
+	log.Printf("raft: %x became leader at term %d", r.id, r.Term)
 }
 
 func (r *raft) campaign() {
@@ -425,6 +437,8 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 	if mlastIndex, ok := r.raftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: mlastIndex})
 	} else {
+		log.Printf("raft: %x [logterm: %d, index: %d] rejected msgApp [logterm: %d, index: %d] from %x",
+			r.id, r.raftLog.term(m.Index), m.Index, m.LogTerm, m.Index, m.From)
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: m.Index, Reject: true})
 	}
 }
@@ -434,9 +448,14 @@ func (r *raft) handleHeartbeat(m pb.Message) {
 }
 
 func (r *raft) handleSnapshot(m pb.Message) {
+	sindex, sterm := m.Snapshot.Metadata.Index, m.Snapshot.Metadata.Term
 	if r.restore(m.Snapshot) {
+		log.Printf("raft: %x [commit: %d] restored snapshot [index: %d, term: %d]",
+			r.id, r.Commit, sindex, sterm)
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()})
 	} else {
+		log.Printf("raft: %x [commit: %d] ignored snapshot [index: %d, term: %d]",
+			r.id, r.Commit, sindex, sterm)
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.committed})
 	}
 }
@@ -477,6 +496,8 @@ func stepLeader(r *raft, m pb.Message) {
 			return
 		}
 		if m.Reject {
+			log.Printf("raft: %x received msgApp rejection from %x for index %d",
+				r.id, m.From, m.Index)
 			if r.prs[m.From].maybeDecrTo(m.Index) {
 				r.sendAppend(m.From)
 			}
@@ -487,6 +508,8 @@ func stepLeader(r *raft, m pb.Message) {
 			}
 		}
 	case pb.MsgVote:
+		log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %x",
+			r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 		r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp, Reject: true})
 	}
 }
@@ -502,9 +525,12 @@ func stepCandidate(r *raft, m pb.Message) {
 		r.becomeFollower(m.Term, m.From)
 		r.handleSnapshot(m)
 	case pb.MsgVote:
+		log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %x",
+			r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 		r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp, Reject: true})
 	case pb.MsgVoteResp:
 		gr := r.poll(m.From, !m.Reject)
+		log.Printf("raft: %x [q:%d] has received %d votes and %d vote rejections", r.id, r.q(), gr, len(r.votes)-gr)
 		switch r.q() {
 		case gr:
 			r.becomeLeader()
@@ -537,9 +563,13 @@ func stepFollower(r *raft, m pb.Message) {
 	case pb.MsgVote:
 		if (r.Vote == None || r.Vote == m.From) && r.raftLog.isUpToDate(m.Index, m.LogTerm) {
 			r.elapsed = 0
+			log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] voted for %x [logterm: %d, index: %d] at term %x",
+				r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 			r.Vote = m.From
 			r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp})
 		} else {
+			log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %x",
+				r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 			r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp, Reject: true})
 		}
 	}
@@ -551,15 +581,20 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	if s.Metadata.Index <= r.raftLog.committed {
 		return false
 	}
+	log.Printf("raft: %x [commit: %d, lastindex: %d, lastterm: %d] starts to restore snapshot [index: %d, term: %d]",
+		r.id, r.Commit, r.raftLog.lastIndex(), r.raftLog.lastTerm(), s.Metadata.Index, s.Metadata.Term)
 
 	r.raftLog.restore(s)
 	r.prs = make(map[uint64]*progress)
 	for _, n := range s.Metadata.ConfState.Nodes {
+		match, next := uint64(0), uint64(r.raftLog.lastIndex())+1
 		if n == r.id {
-			r.setProgress(n, r.raftLog.lastIndex(), r.raftLog.lastIndex()+1)
+			match = next - 1
 		} else {
-			r.setProgress(n, 0, r.raftLog.lastIndex()+1)
+			match = 0
 		}
+		log.Printf("raft: %x restored progress of %x [match: %d, next: %d]", r.id, n, match, next)
+		r.setProgress(n, match, next)
 	}
 	return true
 }

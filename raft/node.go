@@ -144,7 +144,7 @@ func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage
 			panic("unexpected marshal error")
 		}
 		e := pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: r.raftLog.lastIndex() + 1, Data: d}
-		r.raftLog.append(r.raftLog.lastIndex(), e)
+		r.raftLog.append(e)
 	}
 	// Mark these initial entries as committed.
 	// TODO(bdarnell): These entries are still unstable; do we need to preserve
@@ -209,6 +209,7 @@ func (n *node) run(r *raft) {
 	var readyc chan Ready
 	var advancec chan struct{}
 	var prevLastUnstablei uint64
+	var prevLastUnstablet uint64
 	var havePrevLastUnstablei bool
 	var prevSnapi uint64
 	var rd Ready
@@ -284,16 +285,13 @@ func (n *node) run(r *raft) {
 			}
 			if len(rd.Entries) > 0 {
 				prevLastUnstablei = rd.Entries[len(rd.Entries)-1].Index
+				prevLastUnstablet = rd.Entries[len(rd.Entries)-1].Term
 				havePrevLastUnstablei = true
 			}
 			if !IsEmptyHardState(rd.HardState) {
 				prevHardSt = rd.HardState
 			}
 			if !IsEmptySnap(rd.Snapshot) {
-				if rd.Snapshot.Metadata.Index > prevLastUnstablei {
-					prevLastUnstablei = rd.Snapshot.Metadata.Index
-					havePrevLastUnstablei = true
-				}
 				prevSnapi = rd.Snapshot.Metadata.Index
 			}
 			r.msgs = nil
@@ -303,7 +301,7 @@ func (n *node) run(r *raft) {
 				r.raftLog.appliedTo(prevHardSt.Commit)
 			}
 			if havePrevLastUnstablei {
-				r.raftLog.stableTo(prevLastUnstablei)
+				r.raftLog.stableTo(prevLastUnstablei, prevLastUnstablet)
 				havePrevLastUnstablei = false
 			}
 			r.raftLog.stableSnapTo(prevSnapi)

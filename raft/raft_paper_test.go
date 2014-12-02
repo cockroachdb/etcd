@@ -29,6 +29,10 @@ package raft
 
 import (
 	"fmt"
+	"io/ioutil"
+	"log"
+	"os"
+
 	"reflect"
 	"sort"
 	"testing"
@@ -292,9 +296,13 @@ func TestCandidateFallback(t *testing.T) {
 }
 
 func TestFollowerElectionTimeoutRandomized(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
+	defer log.SetOutput(os.Stderr)
 	testNonleaderElectionTimeoutRandomized(t, StateFollower)
 }
 func TestCandidateElectionTimeoutRandomized(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
+	defer log.SetOutput(os.Stderr)
 	testNonleaderElectionTimeoutRandomized(t, StateCandidate)
 }
 
@@ -329,9 +337,13 @@ func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 }
 
 func TestFollowersElectioinTimeoutNonconflict(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
+	defer log.SetOutput(os.Stderr)
 	testNonleadersElectionTimeoutNonconflict(t, StateFollower)
 }
 func TestCandidatesElectionTimeoutNonconflict(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
+	defer log.SetOutput(os.Stderr)
 	testNonleadersElectionTimeoutNonconflict(t, StateCandidate)
 }
 
@@ -642,9 +654,9 @@ func TestFollowerAppendEntries(t *testing.T) {
 		},
 		{
 			1, 1,
-			[]pb.Entry{{Term: 3, Index: 3}, {Term: 4, Index: 4}},
-			[]pb.Entry{{Term: 1, Index: 1}, {Term: 3, Index: 3}, {Term: 4, Index: 4}},
-			[]pb.Entry{{Term: 3, Index: 3}, {Term: 4, Index: 4}},
+			[]pb.Entry{{Term: 3, Index: 2}, {Term: 4, Index: 3}},
+			[]pb.Entry{{Term: 1, Index: 1}, {Term: 3, Index: 2}, {Term: 4, Index: 3}},
+			[]pb.Entry{{Term: 3, Index: 2}, {Term: 4, Index: 3}},
 		},
 		{
 			0, 0,
@@ -654,9 +666,9 @@ func TestFollowerAppendEntries(t *testing.T) {
 		},
 		{
 			0, 0,
-			[]pb.Entry{{Term: 3, Index: 3}},
-			[]pb.Entry{{Term: 3, Index: 3}},
-			[]pb.Entry{{Term: 3, Index: 3}},
+			[]pb.Entry{{Term: 3, Index: 1}},
+			[]pb.Entry{{Term: 3, Index: 1}},
+			[]pb.Entry{{Term: 3, Index: 1}},
 		},
 	}
 	for i, tt := range tests {
@@ -902,7 +914,7 @@ func commitNoopEntry(r *raft, s *MemoryStorage) {
 	r.readMessages()
 	s.Append(r.raftLog.unstableEntries())
 	r.raftLog.appliedTo(r.raftLog.committed)
-	r.raftLog.stableTo(r.raftLog.lastIndex())
+	r.raftLog.stableTo(r.raftLog.lastIndex(), r.raftLog.lastTerm())
 }
 
 func acceptAndReply(m pb.Message) pb.Message {
