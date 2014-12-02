@@ -14,7 +14,8 @@ type MultiNode interface {
 	ApplyConfChange(group uint64, cc pb.ConfChange)
 	Step(ctx context.Context, group uint64, msg pb.Message) error
 	Ready() <-chan map[uint64]Ready
-	Advance()
+	// Advance() must be called with the last value returned from the Ready() channel.
+	Advance(map[uint64]Ready)
 	Stop()
 	// TODO: Add Compact. Is Campaign necessary?
 }
@@ -56,7 +57,7 @@ type multiNode struct {
 	recvc     chan multiMessage
 	confc     chan multiConfChange
 	readyc    chan map[uint64]Ready
-	advancec  chan struct{}
+	advancec  chan map[uint64]Ready
 	tickc     chan struct{}
 	done      chan struct{}
 }
@@ -71,7 +72,7 @@ func newMultiNode(id uint64, election, heartbeat int) multiNode {
 		recvc:     make(chan multiMessage),
 		confc:     make(chan multiConfChange),
 		readyc:    make(chan map[uint64]Ready),
-		advancec:  make(chan struct{}),
+		advancec:  make(chan map[uint64]Ready),
 		tickc:     make(chan struct{}),
 		done:      make(chan struct{}),
 	}
@@ -103,7 +104,15 @@ func (g *groupState) commitReady(rd Ready) {
 		// TODO(bdarnell): stableTo(rd.Snapshot.Index) if any
 		g.raft.raftLog.stableTo(rd.Entries[len(rd.Entries)-1].Index)
 	}
-	g.raft.raftLog.appliedTo(rd.HardState.Commit)
+
+	// TODO(bdarnell): in node.go, Advance() ignores CommittedEntries and calls
+	// appliedTo with HardState.Commit, but this causes problems in multinode/cockroach.
+	// The two should be the same except for the special-casing of the initial ConfChange
+	// entries.
+	if len(rd.CommittedEntries) > 0 {
+		g.raft.raftLog.appliedTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
+	}
+	//g.raft.raftLog.appliedTo(rd.HardState.Commit)
 
 	g.raft.msgs = nil
 }
@@ -111,7 +120,7 @@ func (g *groupState) commitReady(rd Ready) {
 func (mn *multiNode) run() {
 	groups := map[uint64]*groupState{}
 	rds := map[uint64]Ready{}
-	var advancec chan struct{}
+	var advancec chan map[uint64]Ready
 	for {
 		readyc := mn.readyc
 		if len(rds) == 0 || advancec != nil {
@@ -178,12 +187,20 @@ func (mn *multiNode) run() {
 				}
 			}
 		case readyc <- rds:
-			advancec = mn.advancec
-		case <-advancec:
-			for group, rd := range rds {
-				groups[group].commitReady(rd)
-			}
 			rds = map[uint64]Ready{}
+			advancec = mn.advancec
+		case advs := <-advancec:
+			for group, rd := range advs {
+				groups[group].commitReady(rd)
+
+				// We've been accumulating new entries in rds which may now be obsolete.
+				// Drop the old Ready object and create a new one if needed.
+				delete(rds, group)
+				newRd := groups[group].newReady()
+				if newRd.containsUpdates() {
+					rds[group] = newRd
+				}
+			}
 			advancec = nil
 		case <-mn.done:
 			return
@@ -284,9 +301,9 @@ func (mn *multiNode) Ready() <-chan map[uint64]Ready {
 	return mn.readyc
 }
 
-func (mn *multiNode) Advance() {
+func (mn *multiNode) Advance(rds map[uint64]Ready) {
 	select {
-	case mn.advancec <- struct{}{}:
+	case mn.advancec <- rds:
 	case <-mn.done:
 	}
 }
