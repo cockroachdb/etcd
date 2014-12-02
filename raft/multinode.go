@@ -102,7 +102,8 @@ func (g *groupState) commitReady(rd Ready) {
 	}
 	if len(rd.Entries) > 0 {
 		// TODO(bdarnell): stableTo(rd.Snapshot.Index) if any
-		g.raft.raftLog.stableTo(rd.Entries[len(rd.Entries)-1].Index)
+		e := rd.Entries[len(rd.Entries)-1]
+		g.raft.raftLog.stableTo(e.Index, e.Term)
 	}
 
 	// TODO(bdarnell): in node.go, Advance() ignores CommittedEntries and calls
@@ -152,7 +153,7 @@ func (mn *multiNode) run() {
 				}
 				ents[i] = pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: uint64(i + 1), Data: data}
 			}
-			r.raftLog.append(0, ents...)
+			r.raftLog.append(ents...)
 			r.raftLog.committed = uint64(len(ents))
 			close(gc.done)
 		case mm := <-mn.propc:
