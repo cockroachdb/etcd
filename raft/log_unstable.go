@@ -34,10 +34,11 @@ type unstable struct {
 	offset  uint64
 }
 
-// maybeFirstIndex returns the first index if it has a snapshot.
+// maybeFirstIndex returns the index of the first possible entry in entries
+// if it has a snapshot.
 func (u *unstable) maybeFirstIndex() (uint64, bool) {
 	if u.snapshot != nil {
-		return u.snapshot.Metadata.Index, true
+		return u.snapshot.Metadata.Index + 1, true
 	}
 	return 0, false
 }
@@ -106,16 +107,16 @@ func (u *unstable) restore(s pb.Snapshot) {
 func (u *unstable) truncateAndAppend(ents []pb.Entry) {
 	after := ents[0].Index - 1
 	switch {
+	case after == u.offset+uint64(len(u.entries))-1:
+		// after is the last index in the u.entries
+		// directly append
+		u.entries = append(u.entries, ents...)
 	case after < u.offset:
 		log.Printf("raftlog: replace the unstable entries from index %d", after+1)
 		// The log is being truncated to before our current offset
 		// portion, so set the offset and replace the entries
 		u.offset = after + 1
 		u.entries = ents
-	case after == u.offset+uint64(len(u.entries))-1:
-		// after is the last index in the u.entries
-		// directly append
-		u.entries = append(u.entries, ents...)
 	default:
 		// truncate to after and copy to u.entries
 		// then append
@@ -126,22 +127,17 @@ func (u *unstable) truncateAndAppend(ents []pb.Entry) {
 }
 
 func (u *unstable) slice(lo uint64, hi uint64) []pb.Entry {
-	if lo >= hi {
-		return nil
-	}
-	if u.isOutOfBounds(lo) || u.isOutOfBounds(hi-1) {
-		return nil
-	}
+	u.mustCheckOutOfBounds(lo, hi)
 	return u.entries[lo-u.offset : hi-u.offset]
 }
 
-func (u *unstable) isOutOfBounds(i uint64) bool {
-	if len(u.entries) == 0 {
-		return true
+// u.offset <= lo <= hi <= u.offset+len(u.offset)
+func (u *unstable) mustCheckOutOfBounds(lo, hi uint64) {
+	if lo > hi {
+		log.Panicf("raft: invalid unstable.slice %d > %d", lo, hi)
 	}
-	last := u.offset + uint64(len(u.entries)) - 1
-	if i < u.offset || i > last {
-		return true
+	upper := u.offset + uint64(len(u.entries))
+	if lo < u.offset || hi > upper {
+		log.Panicf("raft: unstable.slice[%d,%d) out of bound [%d,%d]", lo, hi, u.offset, upper)
 	}
-	return false
 }

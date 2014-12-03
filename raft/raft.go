@@ -191,9 +191,9 @@ func (r *raft) String() string {
 
 func (r *raft) poll(id uint64, v bool) (granted int) {
 	if v {
-		log.Printf("raft: %x received vote from %x at term %x", r.id, id, r.Term)
+		log.Printf("raft: %x received vote from %x at term %d", r.id, id, r.Term)
 	} else {
-		log.Printf("raft: %x received vote rejection from %x at term %x", r.id, id, r.Term)
+		log.Printf("raft: %x received vote rejection from %x at term %d", r.id, id, r.Term)
 	}
 	if _, ok := r.votes[id]; !ok {
 		r.votes[id] = v
@@ -581,6 +581,13 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	if s.Metadata.Index <= r.raftLog.committed {
 		return false
 	}
+	if r.raftLog.matchTerm(s.Metadata.Index, s.Metadata.Term) {
+		log.Printf("raft: %x [commit: %d, lastindex: %d, lastterm: %d] fast-forwarded commit to snapshot [index: %d, term: %d]",
+			r.id, r.Commit, r.raftLog.lastIndex(), r.raftLog.lastTerm(), s.Metadata.Index, s.Metadata.Term)
+		r.raftLog.commitTo(s.Metadata.Index)
+		return false
+	}
+
 	log.Printf("raft: %x [commit: %d, lastindex: %d, lastterm: %d] starts to restore snapshot [index: %d, term: %d]",
 		r.id, r.Commit, r.raftLog.lastIndex(), r.raftLog.lastTerm(), s.Metadata.Index, s.Metadata.Term)
 
@@ -628,6 +635,9 @@ func (r *raft) promotable() bool {
 }
 
 func (r *raft) loadState(state pb.HardState) {
+	if state.Commit < r.raftLog.committed || state.Commit > r.raftLog.lastIndex() {
+		log.Panicf("raft: %x state.commit %d is out of range [%d, %d]", r.id, state.Commit, r.raftLog.committed, r.raftLog.lastIndex())
+	}
 	r.raftLog.committed = state.Commit
 	r.Term = state.Term
 	r.Vote = state.Vote
