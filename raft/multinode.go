@@ -114,8 +114,6 @@ func (g *groupState) commitReady(rd Ready) {
 		g.raft.raftLog.appliedTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
 	//g.raft.raftLog.appliedTo(rd.HardState.Commit)
-
-	g.raft.msgs = nil
 }
 
 func (mn *multiNode) run() {
@@ -188,6 +186,10 @@ func (mn *multiNode) run() {
 				}
 			}
 		case readyc <- rds:
+			// Clear outgoing messages as soon as we've passed them to the application.
+			for g := range rds {
+				groups[g].raft.msgs = nil
+			}
 			rds = map[uint64]Ready{}
 			advancec = mn.advancec
 		case advs := <-advancec:
