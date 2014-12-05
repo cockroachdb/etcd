@@ -9,6 +9,7 @@ import (
 type MultiNode interface {
 	CreateGroup(group uint64, peers []Peer, storage Storage) error
 	Tick()
+	Campaign(ctx context.Context, group uint64) error
 	Propose(ctx context.Context, group uint64, data []byte) error
 	ProposeConfChange(ctx context.Context, group uint64, cc pb.ConfChange) error
 	ApplyConfChange(group uint64, cc pb.ConfChange)
@@ -153,6 +154,9 @@ func (mn *multiNode) run() {
 			}
 			r.raftLog.append(ents...)
 			r.raftLog.committed = uint64(len(ents))
+			for _, peer := range gc.peers {
+				r.addNode(peer.ID)
+			}
 			close(gc.done)
 		case mm := <-mn.propc:
 			// TODO(bdarnell): single-node impl doesn't read from propc unless the group
@@ -242,6 +246,14 @@ func (mn *multiNode) Tick() {
 	case mn.tickc <- struct{}{}:
 	case <-mn.done:
 	}
+}
+
+func (mn *multiNode) Campaign(ctx context.Context, group uint64) error {
+	return mn.step(ctx, multiMessage{group,
+		pb.Message{
+			Type: pb.MsgHup,
+		},
+	})
 }
 
 func (mn *multiNode) Propose(ctx context.Context, group uint64, data []byte) error {
