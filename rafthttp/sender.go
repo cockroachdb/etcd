@@ -32,7 +32,11 @@ import (
 
 const (
 	connPerSender = 4
-	senderBufSize = connPerSender * 4
+	// senderBufSize is the size of sender buffer, which helps hold the
+	// temporary network latency.
+	// The size ensures that sender does not drop messages when the network
+	// is out of work for less than 1 second in good path.
+	senderBufSize = 64
 
 	appRespBatchMs = 50
 
@@ -42,7 +46,7 @@ const (
 
 type Sender interface {
 	// StartStreaming enables streaming in the sender using the given writer,
-	// which provides a fast and effecient way to send appendEntry messages.
+	// which provides a fast and efficient way to send appendEntry messages.
 	StartStreaming(w WriteFlusher, to types.ID, term uint64) (done <-chan struct{}, err error)
 	Update(u string)
 	// Send sends the data to the remote node. It is always non-blocking.
@@ -51,6 +55,13 @@ type Sender interface {
 	// Stop performs any necessary finalization and terminates the Sender
 	// elegantly.
 	Stop()
+
+	// Pause pauses the sender. The sender will simply drops all incoming
+	// messages without retruning an error.
+	Pause()
+
+	// Resume resumes a paused sender.
+	Resume()
 }
 
 func NewSender(tr http.RoundTripper, u string, cid types.ID, p Processor, fs *stats.FollowerStats, shouldstop chan struct{}) *sender {
@@ -85,8 +96,9 @@ type sender struct {
 	strmSrvMu sync.Mutex
 	q         chan []byte
 
-	mu sync.RWMutex
-	wg sync.WaitGroup
+	paused bool
+	mu     sync.RWMutex
+	wg     sync.WaitGroup
 }
 
 func (s *sender) StartStreaming(w WriteFlusher, to types.ID, term uint64) (<-chan struct{}, error) {
@@ -112,6 +124,13 @@ func (s *sender) Update(u string) {
 
 // TODO (xiangli): reasonable retry logic
 func (s *sender) Send(m raftpb.Message) error {
+	s.mu.RLock()
+	pause := s.paused
+	s.mu.RUnlock()
+	if pause {
+		return nil
+	}
+
 	s.maybeStopStream(m.Term)
 	if shouldInitStream(m) && !s.hasStreamClient() {
 		s.initStream(types.ID(m.From), types.ID(m.To), m.Term)
@@ -150,6 +169,18 @@ func (s *sender) Stop() {
 	if s.strmCln != nil {
 		s.strmCln.stop()
 	}
+}
+
+func (s *sender) Pause() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = true
+}
+
+func (s *sender) Resume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = false
 }
 
 func (s *sender) maybeStopStream(term uint64) {

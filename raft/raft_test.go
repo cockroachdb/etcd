@@ -668,10 +668,10 @@ func TestHandleMsgApp(t *testing.T) {
 		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 1, Index: 1, Commit: 4, Entries: []pb.Entry{{Index: 2, Term: 2}}}, 2, 2, false},
 
 		// Ensure 3
-		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3}, 2, 1, false},                                           // match entry 1, commit upto last new entry 1
-		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3, Entries: []pb.Entry{{Index: 2, Term: 2}}}, 2, 2, false}, // match entry 1, commit upto last new entry 2
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 3}, 2, 2, false},                                           // match entry 2, commit upto last new entry 2
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 4}, 2, 2, false},                                           // commit upto log.last()
+		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3}, 2, 1, false},                                           // match entry 1, commit up to last new entry 1
+		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3, Entries: []pb.Entry{{Index: 2, Term: 2}}}, 2, 2, false}, // match entry 1, commit up to last new entry 2
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 3}, 2, 2, false},                                           // match entry 2, commit up to last new entry 2
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 4}, 2, 2, false},                                           // commit up to log.last()
 	}
 
 	for i, tt := range tests {
@@ -918,7 +918,7 @@ func TestLeaderAppResp(t *testing.T) {
 		wcommitted uint64
 	}{
 		{3, true, 0, 3, 0, 0, 0},  // stale resp; no replies
-		{2, true, 0, 2, 1, 1, 0},  // denied resp; leader does not commit; decrese next and send probing msg
+		{2, true, 0, 2, 1, 1, 0},  // denied resp; leader does not commit; decrease next and send probing msg
 		{2, false, 2, 4, 2, 2, 2}, // accept resp; leader commits; broadcast with commit index
 		{0, false, 0, 3, 0, 0, 0}, // ignore heartbeat replies
 	}
@@ -997,8 +997,8 @@ func TestBcastBeat(t *testing.T) {
 		3: min(sm.raftLog.committed, sm.prs[3].match),
 	}
 	for i, m := range msgs {
-		if m.Type != pb.MsgApp {
-			t.Fatalf("#%d: type = %v, want = %v", i, m.Type, pb.MsgApp)
+		if m.Type != pb.MsgHeartbeat {
+			t.Fatalf("#%d: type = %v, want = %v", i, m.Type, pb.MsgHeartbeat)
 		}
 		if m.Index != 0 {
 			t.Fatalf("#%d: prevIndex = %d, want %d", i, m.Index, 0)
@@ -1052,8 +1052,8 @@ func TestRecvMsgBeat(t *testing.T) {
 			t.Errorf("%d: len(msgs) = %d, want %d", i, len(msgs), tt.wMsg)
 		}
 		for _, m := range msgs {
-			if m.Type != pb.MsgApp {
-				t.Errorf("%d: msg.type = %v, want %v", i, m.Type, pb.MsgApp)
+			if m.Type != pb.MsgHeartbeat {
+				t.Errorf("%d: msg.type = %v, want %v", i, m.Type, pb.MsgHeartbeat)
 			}
 		}
 	}
@@ -1223,7 +1223,7 @@ func TestSlowNodeRestore(t *testing.T) {
 	// trigger a commit
 	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{}}})
 	if follower.raftLog.committed != lead.raftLog.committed {
-		t.Errorf("follower.comitted = %d, want %d", follower.raftLog.committed, lead.raftLog.committed)
+		t.Errorf("follower.committed = %d, want %d", follower.raftLog.committed, lead.raftLog.committed)
 	}
 }
 
@@ -1377,9 +1377,9 @@ func TestRaftNodes(t *testing.T) {
 }
 
 func ents(terms ...uint64) *raft {
-	ents := []pb.Entry{}
+	ents := []pb.Entry{{}}
 	for i, term := range terms {
-		ents = append(ents, pb.Entry{Index: uint64(i), Term: term})
+		ents = append(ents, pb.Entry{Index: uint64(i + 1), Term: term})
 	}
 
 	sm := &raft{

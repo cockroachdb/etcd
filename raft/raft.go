@@ -235,7 +235,7 @@ func (r *raft) sendAppend(to uint64) {
 		m.Snapshot = snapshot
 		sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term
 		log.Printf("raft: %x [firstindex: %d, commit: %d] sent snapshot[index: %d, term: %d] to %x [match: %d, next: %d]",
-			r.id, r.raftLog.firstIndex(), r.Commit, to, sindex, sterm, pr.match, pr.next)
+			r.id, r.raftLog.firstIndex(), r.Commit, sindex, sterm, to, pr.match, pr.next)
 	} else {
 		m.Type = pb.MsgApp
 		m.Index = pr.next - 1
@@ -262,7 +262,7 @@ func (r *raft) sendHeartbeat(to uint64) {
 	commit := min(r.prs[to].match, r.raftLog.committed)
 	m := pb.Message{
 		To:     to,
-		Type:   pb.MsgApp,
+		Type:   pb.MsgHeartbeat,
 		Commit: commit,
 	}
 	r.send(m)
@@ -399,11 +399,14 @@ func (r *raft) campaign() {
 	r.becomeCandidate()
 	if r.q() == r.poll(r.id, true) {
 		r.becomeLeader()
+		return
 	}
 	for i := range r.prs {
 		if i == r.id {
 			continue
 		}
+		log.Printf("raft: %x [logterm: %d, index: %d] sent vote request to %x at term %d",
+			r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), i, r.Term)
 		r.send(pb.Message{To: i, Type: pb.MsgVote, Index: r.raftLog.lastIndex(), LogTerm: r.raftLog.lastTerm()})
 	}
 }
@@ -413,7 +416,9 @@ func (r *raft) Step(m pb.Message) error {
 	defer func() { r.Commit = r.raftLog.committed }()
 
 	if m.Type == pb.MsgHup {
+		log.Printf("raft: %x is starting a new election at term %d", r.id, r.Term)
 		r.campaign()
+		return nil
 	}
 
 	switch {
@@ -424,9 +429,13 @@ func (r *raft) Step(m pb.Message) error {
 		if m.Type == pb.MsgVote {
 			lead = None
 		}
+		log.Printf("raft: %x [term: %d] received a %s message with higher term from %x [term: %d]",
+			r.id, r.Term, m.Type, m.From, m.Term)
 		r.becomeFollower(m.Term, lead)
 	case m.Term < r.Term:
 		// ignore
+		log.Printf("raft: %x [term: %d] ignored a %s message with lower term from %x [term: %d]",
+			r.id, r.Term, m.Type, m.From, m.Term)
 		return nil
 	}
 	r.step(r, m)
@@ -463,6 +472,12 @@ func (r *raft) handleSnapshot(m pb.Message) {
 func (r *raft) resetPendingConf() { r.pendingConf = false }
 
 func (r *raft) addNode(id uint64) {
+	if _, ok := r.prs[id]; ok {
+		// Ignore any redundant addNode calls (which can happen because the
+		// initial bootstrapping entries are applied twice).
+		return
+	}
+
 	r.setProgress(id, 0, r.raftLog.lastIndex()+1)
 	r.pendingConf = false
 }
@@ -492,9 +507,6 @@ func stepLeader(r *raft, m pb.Message) {
 		r.appendEntry(e)
 		r.bcastAppend()
 	case pb.MsgAppResp:
-		if m.Index == 0 {
-			return
-		}
 		if m.Reject {
 			log.Printf("raft: %x received msgApp rejection from %x for index %d",
 				r.id, m.From, m.Index)
@@ -521,6 +533,9 @@ func stepCandidate(r *raft, m pb.Message) {
 	case pb.MsgApp:
 		r.becomeFollower(r.Term, m.From)
 		r.handleAppendEntries(m)
+	case pb.MsgHeartbeat:
+		r.becomeFollower(r.Term, m.From)
+		r.handleHeartbeat(m)
 	case pb.MsgSnap:
 		r.becomeFollower(m.Term, m.From)
 		r.handleSnapshot(m)
@@ -552,11 +567,11 @@ func stepFollower(r *raft, m pb.Message) {
 	case pb.MsgApp:
 		r.elapsed = 0
 		r.lead = m.From
-		if m.LogTerm == 0 && m.Index == 0 && len(m.Entries) == 0 {
-			r.handleHeartbeat(m)
-		} else {
-			r.handleAppendEntries(m)
-		}
+		r.handleAppendEntries(m)
+	case pb.MsgHeartbeat:
+		r.elapsed = 0
+		r.lead = m.From
+		r.handleHeartbeat(m)
 	case pb.MsgSnap:
 		r.elapsed = 0
 		r.handleSnapshot(m)

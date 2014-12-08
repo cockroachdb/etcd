@@ -90,16 +90,6 @@ type Response struct {
 	err     error
 }
 
-type SendHub interface {
-	rafthttp.SenderFinder
-	Send(m []raftpb.Message)
-	Add(m *Member)
-	Remove(id types.ID)
-	Update(m *Member)
-	Stop()
-	ShouldStopNotify() <-chan struct{}
-}
-
 type Storage interface {
 	// Save function saves ents and state to the underlying stable storage.
 	// Save MUST block until st and ents are on stable storage.
@@ -107,10 +97,12 @@ type Storage interface {
 	// SaveSnap function saves snapshot to the underlying stable storage.
 	SaveSnap(snap raftpb.Snapshot) error
 
-	// TODO: WAL should be able to control cut itself. After implement self-controled cut,
+	// TODO: WAL should be able to control cut itself. After implement self-controlled cut,
 	// remove it in this interface.
 	// Cut cuts out a new wal file for saving new state and entries.
 	Cut() error
+	// Close closes the Storage and performs finalization.
+	Close() error
 }
 
 type Server interface {
@@ -323,6 +315,9 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		snapCount:  cfg.SnapCount,
 	}
 	srv.sendhub = newSendHub(cfg.Transport, cfg.Cluster, srv, sstats, lstats)
+	for _, m := range getOtherMembers(cfg.Cluster, cfg.Name) {
+		srv.sendhub.Add(m)
+	}
 	return srv, nil
 }
 
@@ -396,6 +391,9 @@ func (s *EtcdServer) run() {
 	defer func() {
 		s.node.Stop()
 		s.sendhub.Stop()
+		if err := s.storage.Close(); err != nil {
+			log.Panicf("etcdserver: close storage error: %v", err)
+		}
 		close(s.done)
 	}()
 	for {
@@ -860,6 +858,17 @@ func (s *EtcdServer) snapshot(snapi uint64, snapnodes []uint64) {
 	log.Printf("etcdserver: saved snapshot at index %d", snap.Metadata.Index)
 }
 
+// for testing
+func (s *EtcdServer) PauseSending() {
+	hub := s.sendhub.(*sendHub)
+	hub.pause()
+}
+
+func (s *EtcdServer) ResumeSending() {
+	hub := s.sendhub.(*sendHub)
+	hub.resume()
+}
+
 // checkClientURLsEmptyFromPeers does its best to get the cluster from peers,
 // and if this succeeds, checks that the member of the given id exists in the
 // cluster, and its ClientURLs is empty.
@@ -956,6 +965,16 @@ func startNode(cfg *ServerConfig, ids []types.ID) (id types.ID, n raft.Node, s *
 	s = raft.NewMemoryStorage()
 	n = raft.StartNode(uint64(id), peers, 10, 1, s)
 	return
+}
+
+func getOtherMembers(cl ClusterInfo, self string) []*Member {
+	var ms []*Member
+	for _, m := range cl.Members() {
+		if m.Name != self {
+			ms = append(ms, m)
+		}
+	}
+	return ms
 }
 
 // getOtherPeerURLs returns peer urls of other members in the cluster. The

@@ -32,6 +32,16 @@ const (
 	raftPrefix = "/raft"
 )
 
+type SendHub interface {
+	rafthttp.SenderFinder
+	Send(m []raftpb.Message)
+	Add(m *Member)
+	Remove(id types.ID)
+	Update(m *Member)
+	Stop()
+	ShouldStopNotify() <-chan struct{}
+}
+
 type sendHub struct {
 	tr         http.RoundTripper
 	cl         ClusterInfo
@@ -46,7 +56,7 @@ type sendHub struct {
 // to other members. The returned sendHub will update the given ServerStats and
 // LeaderStats appropriately.
 func newSendHub(t http.RoundTripper, cl ClusterInfo, p rafthttp.Processor, ss *stats.ServerStats, ls *stats.LeaderStats) *sendHub {
-	h := &sendHub{
+	return &sendHub{
 		tr:         t,
 		cl:         cl,
 		p:          p,
@@ -55,10 +65,6 @@ func newSendHub(t http.RoundTripper, cl ClusterInfo, p rafthttp.Processor, ss *s
 		senders:    make(map[types.ID]rafthttp.Sender),
 		shouldstop: make(chan struct{}, 1),
 	}
-	for _, m := range cl.Members() {
-		h.Add(m)
-	}
-	return h
 }
 
 func (h *sendHub) Sender(id types.ID) rafthttp.Sender { return h.senders[id] }
@@ -128,4 +134,17 @@ func (h *sendHub) Update(m *Member) {
 	}
 	u.Path = path.Join(u.Path, raftPrefix)
 	h.senders[m.ID].Update(u.String())
+}
+
+// for testing
+func (h *sendHub) pause() {
+	for _, s := range h.senders {
+		s.Pause()
+	}
+}
+
+func (h *sendHub) resume() {
+	for _, s := range h.senders {
+		s.Resume()
+	}
 }

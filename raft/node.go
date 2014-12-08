@@ -150,6 +150,18 @@ func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage
 	// TODO(bdarnell): These entries are still unstable; do we need to preserve
 	// the invariant that committed < unstable?
 	r.raftLog.committed = r.raftLog.lastIndex()
+	// Now apply them, mainly so that the application can call Campaign
+	// immediately after StartNode in tests. Note that these nodes will
+	// be added to raft twice: here and when the application's Ready
+	// loop calls ApplyConfChange. The calls to addNode must come after
+	// all calls to raftLog.append so progress.next is set after these
+	// bootstrapping entries (it is an error if we try to append these
+	// entries since they have already been committed).
+	// We do not set raftLog.applied so the application will be able
+	// to observe all conf changes via Ready.CommittedEntries.
+	for _, peer := range peers {
+		r.addNode(peer.ID)
+	}
 
 	go n.run(r)
 	return &n
@@ -233,13 +245,13 @@ func (n *node) run(r *raft) {
 		if lead != r.leader() {
 			if r.hasLeader() {
 				if lead == None {
-					log.Printf("raft: elected leader %x at term %d", r.leader(), r.Term)
+					log.Printf("raft.node: %x elected leader %x at term %d", r.id, r.leader(), r.Term)
 				} else {
-					log.Printf("raft: leader changed from %x to %x at term %d", lead, r.leader(), r.Term)
+					log.Printf("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.leader(), r.Term)
 				}
 				propc = n.propc
 			} else {
-				log.Printf("raft: lost leader %x at term %d", lead, r.Term)
+				log.Printf("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
 				propc = nil
 			}
 			lead = r.leader()
@@ -253,7 +265,10 @@ func (n *node) run(r *raft) {
 			m.From = r.id
 			r.Step(m)
 		case m := <-n.recvc:
-			r.Step(m) // raft never returns an error
+			// filter out response message from unknow From.
+			if _, ok := r.prs[m.From]; ok || !IsResponseMsg(m) {
+				r.Step(m) // raft never returns an error
+			}
 		case cc := <-n.confc:
 			if cc.NodeID == None {
 				r.resetPendingConf()
@@ -322,9 +337,7 @@ func (n *node) Tick() {
 	}
 }
 
-func (n *node) Campaign(ctx context.Context) error {
-	return n.step(ctx, pb.Message{Type: pb.MsgHup})
-}
+func (n *node) Campaign(ctx context.Context) error { return n.step(ctx, pb.Message{Type: pb.MsgHup}) }
 
 func (n *node) Propose(ctx context.Context, data []byte) error {
 	return n.step(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
@@ -332,7 +345,7 @@ func (n *node) Propose(ctx context.Context, data []byte) error {
 
 func (n *node) Step(ctx context.Context, m pb.Message) error {
 	// ignore unexpected local messages receiving over network
-	if m.Type == pb.MsgHup || m.Type == pb.MsgBeat {
+	if IsLocalMsg(m) {
 		// TODO: return an error?
 		return nil
 	}
@@ -365,9 +378,7 @@ func (n *node) step(ctx context.Context, m pb.Message) error {
 	}
 }
 
-func (n *node) Ready() <-chan Ready {
-	return n.readyc
-}
+func (n *node) Ready() <-chan Ready { return n.readyc }
 
 func (n *node) Advance() {
 	select {

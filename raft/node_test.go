@@ -324,7 +324,6 @@ func TestNodeStart(t *testing.T) {
 	}
 	storage := NewMemoryStorage()
 	n := StartNode(1, []Peer{{ID: 1}}, 10, 1, storage)
-	n.ApplyConfChange(cc)
 	n.Campaign(ctx)
 	g := <-n.Ready()
 	if !reflect.DeepEqual(g, wants[0]) {
@@ -358,7 +357,7 @@ func TestNodeRestart(t *testing.T) {
 
 	want := Ready{
 		HardState: emptyState,
-		// commit upto index commit index in st
+		// commit up to index commit index in st
 		CommittedEntries: entries[:st.Commit],
 	}
 
@@ -393,7 +392,7 @@ func TestNodeRestartFromSnapshot(t *testing.T) {
 
 	want := Ready{
 		HardState: emptyState,
-		// commit upto index commit index in st
+		// commit up to index commit index in st
 		CommittedEntries: entries,
 	}
 
@@ -421,7 +420,6 @@ func TestNodeAdvance(t *testing.T) {
 
 	storage := NewMemoryStorage()
 	n := StartNode(1, []Peer{{ID: 1}}, 10, 1, storage)
-	n.ApplyConfChange(raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 1})
 	n.Campaign(ctx)
 	<-n.Ready()
 	n.Propose(ctx, []byte("foo"))
