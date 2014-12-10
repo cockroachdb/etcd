@@ -19,7 +19,6 @@ package raft
 import (
 	"errors"
 	"log"
-	"reflect"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	pb "github.com/coreos/etcd/raft/raftpb"
@@ -37,11 +36,10 @@ var (
 type SoftState struct {
 	Lead      uint64
 	RaftState StateType
-	Nodes     []uint64
 }
 
 func (a *SoftState) equal(b *SoftState) bool {
-	return reflect.DeepEqual(a, b)
+	return a.Lead == b.Lead && a.RaftState == b.RaftState
 }
 
 // Ready encapsulates the entries and messages that are ready to read,
@@ -137,6 +135,9 @@ func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage
 	n := newNode()
 	r := newRaft(id, nil, election, heartbeat, storage)
 
+	// become the follower at term 1 and apply initial configuration
+	// entires of term 1
+	r.becomeFollower(1, None)
 	for _, peer := range peers {
 		cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
 		d, err := cc.Marshal()
@@ -150,6 +151,7 @@ func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage
 	// TODO(bdarnell): These entries are still unstable; do we need to preserve
 	// the invariant that committed < unstable?
 	r.raftLog.committed = r.raftLog.lastIndex()
+	r.Commit = r.raftLog.committed
 	// Now apply them, mainly so that the application can call Campaign
 	// immediately after StartNode in tests. Note that these nodes will
 	// be added to raft twice: here and when the application's Ready
