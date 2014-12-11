@@ -135,6 +135,7 @@ func (mn *multiNode) run() {
 			if err != nil {
 				panic(err) // TODO(bdarnell)
 			}
+			r.becomeFollower(1, None)
 			group = &groupState{
 				id:         gc.id,
 				raft:       r,
