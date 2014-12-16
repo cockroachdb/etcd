@@ -189,14 +189,20 @@ func Main() {
 		err = startProxy()
 	}
 	if err != nil {
-		log.Fatalf("etcd: %v", err)
+		switch err {
+		case discovery.ErrDuplicateID:
+			log.Fatalf("etcd: member %s has previously registered with discovery service (%s), but the data-dir (%s) on disk cannot be found.",
+				*name, *durl, *dir)
+		default:
+			log.Fatalf("etcd: %v", err)
+		}
 	}
 	<-stopped
 }
 
 // startEtcd launches the etcd server and HTTP handlers for client/server communication.
 func startEtcd() (<-chan struct{}, error) {
-	apurls, err := flags.URLsFromFlags(fs, "initial-advertise-peer-urls", "addr", peerTLSInfo)
+	apurls, err := flags.URLsFromFlags(fs, "initial-advertise-peer-urls", "peer-addr", peerTLSInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -313,13 +319,13 @@ func startEtcd() (<-chan struct{}, error) {
 	// Start the peer server in a goroutine
 	for _, l := range plns {
 		go func(l net.Listener) {
-			log.Fatal(http.Serve(l, ph))
+			log.Fatal(serveHTTP(l, ph))
 		}(l)
 	}
 	// Start a client server goroutine for each listen address
 	for _, l := range clns {
 		go func(l net.Listener) {
-			log.Fatal(http.Serve(l, ch))
+			log.Fatal(serveHTTP(l, ch))
 		}(l)
 	}
 	return s.StopNotify(), nil
@@ -327,7 +333,7 @@ func startEtcd() (<-chan struct{}, error) {
 
 // startProxy launches an HTTP proxy for client communication which proxies to other etcd nodes.
 func startProxy() error {
-	apurls, err := flags.URLsFromFlags(fs, "initial-advertise-peer-urls", "addr", peerTLSInfo)
+	apurls, err := flags.URLsFromFlags(fs, "initial-advertise-peer-urls", "peer-addr", peerTLSInfo)
 	if err != nil {
 		return err
 	}

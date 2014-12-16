@@ -279,7 +279,6 @@ func (r *raft) maybeCommit() bool {
 	}
 	sort.Sort(sort.Reverse(mis))
 	mci := mis[r.q()-1]
-
 	return r.raftLog.maybeCommit(mci, r.Term)
 }
 
@@ -298,10 +297,13 @@ func (r *raft) reset(term uint64) {
 	r.pendingConf = false
 }
 
-func (r *raft) appendEntry(e pb.Entry) {
-	e.Term = r.Term
-	e.Index = r.raftLog.lastIndex() + 1
-	r.raftLog.append(e)
+func (r *raft) appendEntry(es ...pb.Entry) {
+	li := r.raftLog.lastIndex()
+	for i := range es {
+		es[i].Term = r.Term
+		es[i].Index = li + 1 + uint64(i)
+	}
+	r.raftLog.append(es...)
 	r.prs[r.id].update(r.raftLog.lastIndex())
 	r.maybeCommit()
 }
@@ -407,12 +409,10 @@ func (r *raft) poll(id uint64, v bool) (granted int) {
 }
 
 func (r *raft) Step(m pb.Message) error {
-	// TODO(bmizerany): this likely allocs - prevent that.
-	defer func() { r.Commit = r.raftLog.committed }()
-
 	if m.Type == pb.MsgHup {
 		log.Printf("raft: %x is starting a new election at term %d", r.id, r.Term)
 		r.campaign()
+		r.Commit = r.raftLog.committed
 		return nil
 	}
 
@@ -434,6 +434,7 @@ func (r *raft) Step(m pb.Message) error {
 		return nil
 	}
 	r.step(r, m)
+	r.Commit = r.raftLog.committed
 	return nil
 }
 
@@ -444,17 +445,18 @@ func stepLeader(r *raft, m pb.Message) {
 	case pb.MsgBeat:
 		r.bcastHeartbeat()
 	case pb.MsgProp:
-		if len(m.Entries) != 1 {
-			panic("unexpected length(entries) of a MsgProp")
+		if len(m.Entries) == 0 {
+			log.Panicf("raft: %x stepped empty MsgProp", r.id)
 		}
-		e := m.Entries[0]
-		if e.Type == pb.EntryConfChange {
-			if r.pendingConf {
-				return
+		for i, e := range m.Entries {
+			if e.Type == pb.EntryConfChange {
+				if r.pendingConf {
+					m.Entries[i] = pb.Entry{Type: pb.EntryNormal}
+				}
+				r.pendingConf = true
 			}
-			r.pendingConf = true
 		}
-		r.appendEntry(e)
+		r.appendEntry(m.Entries...)
 		r.bcastAppend()
 	case pb.MsgAppResp:
 		if m.Reject {
@@ -470,7 +472,7 @@ func stepLeader(r *raft, m pb.Message) {
 			}
 		}
 	case pb.MsgVote:
-		log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %x",
+		log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %d",
 			r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 		r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp, Reject: true})
 	}
@@ -479,7 +481,8 @@ func stepLeader(r *raft, m pb.Message) {
 func stepCandidate(r *raft, m pb.Message) {
 	switch m.Type {
 	case pb.MsgProp:
-		panic("no leader")
+		log.Printf("raft: %x no leader at term %d; dropping proposal", r.id, r.Term)
+		return
 	case pb.MsgApp:
 		r.becomeFollower(r.Term, m.From)
 		r.handleAppendEntries(m)
@@ -510,7 +513,8 @@ func stepFollower(r *raft, m pb.Message) {
 	switch m.Type {
 	case pb.MsgProp:
 		if r.lead == None {
-			panic("no leader")
+			log.Printf("raft: %x no leader at term %d; dropping proposal", r.id, r.Term)
+			return
 		}
 		m.To = r.lead
 		r.send(m)
@@ -528,12 +532,12 @@ func stepFollower(r *raft, m pb.Message) {
 	case pb.MsgVote:
 		if (r.Vote == None || r.Vote == m.From) && r.raftLog.isUpToDate(m.Index, m.LogTerm) {
 			r.elapsed = 0
-			log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] voted for %x [logterm: %d, index: %d] at term %x",
+			log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] voted for %x [logterm: %d, index: %d] at term %d",
 				r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 			r.Vote = m.From
 			r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp})
 		} else {
-			log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %x",
+			log.Printf("raft: %x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %d",
 				r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 			r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp, Reject: true})
 		}

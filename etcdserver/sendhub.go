@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sync"
 
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/types"
@@ -48,6 +49,7 @@ type sendHub struct {
 	p          rafthttp.Processor
 	ss         *stats.ServerStats
 	ls         *stats.LeaderStats
+	mu         sync.RWMutex // protect the sender map
 	senders    map[types.ID]rafthttp.Sender
 	shouldstop chan struct{}
 }
@@ -67,7 +69,11 @@ func newSendHub(t http.RoundTripper, cl ClusterInfo, p rafthttp.Processor, ss *s
 	}
 }
 
-func (h *sendHub) Sender(id types.ID) rafthttp.Sender { return h.senders[id] }
+func (h *sendHub) Sender(id types.ID) rafthttp.Sender {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.senders[id]
+}
 
 func (h *sendHub) Send(msgs []raftpb.Message) {
 	for _, m := range msgs {
@@ -102,6 +108,8 @@ func (h *sendHub) ShouldStopNotify() <-chan struct{} {
 }
 
 func (h *sendHub) Add(m *Member) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if _, ok := h.senders[m.ID]; ok {
 		return
 	}
@@ -113,16 +121,20 @@ func (h *sendHub) Add(m *Member) {
 	}
 	u.Path = path.Join(u.Path, raftPrefix)
 	fs := h.ls.Follower(m.ID.String())
-	s := rafthttp.NewSender(h.tr, u.String(), h.cl.ID(), h.p, fs, h.shouldstop)
+	s := rafthttp.NewSender(h.tr, u.String(), m.ID, h.cl.ID(), h.p, fs, h.shouldstop)
 	h.senders[m.ID] = s
 }
 
 func (h *sendHub) Remove(id types.ID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.senders[id].Stop()
 	delete(h.senders, id)
 }
 
 func (h *sendHub) Update(m *Member) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	// TODO: return error or just panic?
 	if _, ok := h.senders[m.ID]; !ok {
 		return

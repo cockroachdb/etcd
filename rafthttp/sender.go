@@ -39,6 +39,7 @@ const (
 	senderBufSize = 64
 
 	appRespBatchMs = 50
+	propBatchMs    = 10
 
 	ConnReadTimeout  = 5 * time.Second
 	ConnWriteTimeout = 5 * time.Second
@@ -64,16 +65,19 @@ type Sender interface {
 	Resume()
 }
 
-func NewSender(tr http.RoundTripper, u string, cid types.ID, p Processor, fs *stats.FollowerStats, shouldstop chan struct{}) *sender {
+func NewSender(tr http.RoundTripper, u string, id types.ID, cid types.ID, p Processor, fs *stats.FollowerStats, shouldstop chan struct{}) *sender {
 	s := &sender{
-		tr:         tr,
-		u:          u,
-		cid:        cid,
-		p:          p,
-		fs:         fs,
-		shouldstop: shouldstop,
-		batcher:    NewBatcher(100, appRespBatchMs*time.Millisecond),
-		q:          make(chan []byte, senderBufSize),
+		id:          id,
+		active:      true,
+		tr:          tr,
+		u:           u,
+		cid:         cid,
+		p:           p,
+		fs:          fs,
+		shouldstop:  shouldstop,
+		batcher:     NewBatcher(100, appRespBatchMs*time.Millisecond),
+		propBatcher: NewProposalBatcher(100, propBatchMs*time.Millisecond),
+		q:           make(chan *raftpb.Message, senderBufSize),
 	}
 	s.wg.Add(connPerSender)
 	for i := 0; i < connPerSender; i++ {
@@ -83,22 +87,32 @@ func NewSender(tr http.RoundTripper, u string, cid types.ID, p Processor, fs *st
 }
 
 type sender struct {
+	id  types.ID
+	cid types.ID
+
 	tr         http.RoundTripper
-	u          string
-	cid        types.ID
 	p          Processor
 	fs         *stats.FollowerStats
 	shouldstop chan struct{}
 
-	strmCln   *streamClient
-	batcher   *Batcher
-	strmSrv   *streamServer
-	strmSrvMu sync.Mutex
-	q         chan []byte
+	strmCln     *streamClient
+	batcher     *Batcher
+	propBatcher *ProposalBatcher
+	q           chan *raftpb.Message
 
-	paused bool
-	mu     sync.RWMutex
-	wg     sync.WaitGroup
+	strmSrvMu sync.Mutex
+	strmSrv   *streamServer
+
+	// wait for the handling routines
+	wg sync.WaitGroup
+
+	mu sync.RWMutex
+	u  string // the url this sender post to
+	// if the last send was successful, thi sender is active.
+	// Or it is inactive
+	active  bool
+	errored error
+	paused  bool
 }
 
 func (s *sender) StartStreaming(w WriteFlusher, to types.ID, term uint64) (<-chan struct{}, error) {
@@ -111,6 +125,7 @@ func (s *sender) StartStreaming(w WriteFlusher, to types.ID, term uint64) (<-cha
 		}
 		// stop the existing one
 		s.strmSrv.stop()
+		s.strmSrv = nil
 	}
 	s.strmSrv = startStreamServer(w, to, term, s.fs)
 	return s.strmSrv.stopNotify(), nil
@@ -136,24 +151,45 @@ func (s *sender) Send(m raftpb.Message) error {
 		s.initStream(types.ID(m.From), types.ID(m.To), m.Term)
 		s.batcher.Reset(time.Now())
 	}
-	if canBatch(m) && s.hasStreamClient() {
-		if s.batcher.ShouldBatch(time.Now()) {
-			return nil
+
+	var err error
+	switch {
+	case isProposal(m):
+		s.propBatcher.Batch(m)
+	case canBatch(m) && s.hasStreamClient():
+		if !s.batcher.ShouldBatch(time.Now()) {
+			err = s.send(m)
+		}
+	case canUseStream(m):
+		if ok := s.tryStream(m); !ok {
+			err = s.send(m)
+		}
+	default:
+		err = s.send(m)
+	}
+	// send out batched MsgProp if needed
+	// TODO: it is triggered by all outcoming send now, and it needs
+	// more clear solution. Either use separate goroutine to trigger it
+	// or use streaming.
+	if !s.propBatcher.IsEmpty() {
+		t := time.Now()
+		if !s.propBatcher.ShouldBatch(t) {
+			s.send(s.propBatcher.Message)
+			s.propBatcher.Reset(t)
 		}
 	}
-	if canUseStream(m) {
-		if ok := s.tryStream(m); ok {
-			return nil
-		}
-	}
+	return err
+}
+
+func (s *sender) send(m raftpb.Message) error {
 	// TODO: don't block. we should be able to have 1000s
 	// of messages out at a time.
-	data := pbutil.MustMarshal(&m)
 	select {
-	case s.q <- data:
+	case s.q <- &m:
 		return nil
 	default:
-		log.Printf("sender: reach the maximal serving to %s", s.u)
+		log.Printf("sender: dropping %s because maximal number %d of sender buffer entries to %s has been reached",
+			m.Type, senderBufSize, s.u)
 		return fmt.Errorf("reach maximal serving")
 	}
 }
@@ -164,6 +200,7 @@ func (s *sender) Stop() {
 	s.strmSrvMu.Lock()
 	if s.strmSrv != nil {
 		s.strmSrv.stop()
+		s.strmSrv = nil
 	}
 	s.strmSrvMu.Unlock()
 	if s.strmCln != nil {
@@ -229,16 +266,35 @@ func (s *sender) tryStream(m raftpb.Message) bool {
 
 func (s *sender) handle() {
 	defer s.wg.Done()
-	for d := range s.q {
+	for m := range s.q {
 		start := time.Now()
-		err := s.post(d)
+		err := s.post(pbutil.MustMarshal(m))
 		end := time.Now()
+
+		s.mu.Lock()
 		if err != nil {
-			s.fs.Fail()
-			log.Printf("sender: %v", err)
-			continue
+			if s.errored == nil || s.errored.Error() != err.Error() {
+				log.Printf("sender: error posting to %s: %v", s.id, err)
+				s.errored = err
+			}
+			if s.active {
+				log.Printf("sender: the connection with %s becomes inactive", s.id)
+				s.active = false
+			}
+			if m.Type == raftpb.MsgApp {
+				s.fs.Fail()
+			}
+		} else {
+			if !s.active {
+				log.Printf("sender: the connection with %s becomes active", s.id)
+				s.active = true
+				s.errored = nil
+			}
+			if m.Type == raftpb.MsgApp {
+				s.fs.Succ(end.Sub(start))
+			}
 		}
-		s.fs.Succ(end.Sub(start))
+		s.mu.Unlock()
 	}
 }
 
@@ -249,13 +305,13 @@ func (s *sender) post(data []byte) error {
 	req, err := http.NewRequest("POST", s.u, bytes.NewBuffer(data))
 	s.mu.RUnlock()
 	if err != nil {
-		return fmt.Errorf("new request to %s error: %v", s.u, err)
+		return err
 	}
 	req.Header.Set("Content-Type", "application/protobuf")
 	req.Header.Set("X-Etcd-Cluster-ID", s.cid.String())
 	resp, err := s.tr.RoundTrip(req)
 	if err != nil {
-		return fmt.Errorf("error posting to %q: %v", req.URL.String(), err)
+		return err
 	}
 	resp.Body.Close()
 
@@ -265,19 +321,21 @@ func (s *sender) post(data []byte) error {
 		case s.shouldstop <- struct{}{}:
 		default:
 		}
-		log.Printf("etcdserver: conflicting cluster ID with the target cluster (%s != %s)", resp.Header.Get("X-Etcd-Cluster-ID"), s.cid)
+		log.Printf("rafthttp: conflicting cluster ID with the target cluster (%s != %s)", resp.Header.Get("X-Etcd-Cluster-ID"), s.cid)
 		return nil
 	case http.StatusForbidden:
 		select {
 		case s.shouldstop <- struct{}{}:
 		default:
 		}
-		log.Println("etcdserver: this member has been permanently removed from the cluster")
-		log.Println("etcdserver: the data-dir used by this member must be removed so that this host can be re-added with a new member ID")
+		log.Println("rafthttp: this member has been permanently removed from the cluster")
+		log.Println("rafthttp: the data-dir used by this member must be removed so that this host can be re-added with a new member ID")
 		return nil
 	case http.StatusNoContent:
 		return nil
 	default:
-		return fmt.Errorf("unhandled status %s", http.StatusText(resp.StatusCode))
+		return fmt.Errorf("unexpected http status %s while posting to %q", http.StatusText(resp.StatusCode), req.URL.String())
 	}
 }
+
+func isProposal(m raftpb.Message) bool { return m.Type == raftpb.MsgProp }
