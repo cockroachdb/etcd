@@ -131,17 +131,12 @@ func (mn *multiNode) run() {
 		select {
 		case gc := <-mn.groupc:
 			r := newRaft(mn.id, nil, mn.election, mn.heartbeat, gc.storage)
-			snap, err := r.raftLog.snapshot()
-			if err != nil {
-				panic(err) // TODO(bdarnell)
-			}
 			r.becomeFollower(1, None)
 			group = &groupState{
 				id:         gc.id,
 				raft:       r,
 				prevSoftSt: r.softState(),
 				prevHardSt: r.HardState,
-				prevSnapi:  snap.Metadata.Index,
 			}
 			groups[gc.id] = group
 			ents := make([]pb.Entry, len(gc.peers))
