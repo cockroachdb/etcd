@@ -139,19 +139,29 @@ func (mn *multiNode) run() {
 				prevHardSt: r.HardState,
 			}
 			groups[gc.id] = group
-			ents := make([]pb.Entry, len(gc.peers))
-			for i, peer := range gc.peers {
-				cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
-				data, err := cc.Marshal()
-				if err != nil {
-					panic("unexpected marshal error")
-				}
-				ents[i] = pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: uint64(i + 1), Data: data}
+			lastIndex, err := gc.storage.LastIndex()
+			if err != nil {
+				panic(err) // TODO(bdarnell)
 			}
-			r.raftLog.append(ents...)
-			r.raftLog.committed = uint64(len(ents))
-			for _, peer := range gc.peers {
-				r.addNode(peer.ID)
+			// If the log is empty, this is a new group (like StartNode); otherwise it's
+			// restoring an existing group (like RestartNode).
+			// TODO(bdarnell): rethink group initialization and whether the application needs
+			// to be able to tell us when it expects the group to exist.
+			if lastIndex == 0 {
+				ents := make([]pb.Entry, len(gc.peers))
+				for i, peer := range gc.peers {
+					cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
+					data, err := cc.Marshal()
+					if err != nil {
+						panic("unexpected marshal error")
+					}
+					ents[i] = pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: uint64(i + 1), Data: data}
+				}
+				r.raftLog.append(ents...)
+				r.raftLog.committed = uint64(len(ents))
+				for _, peer := range gc.peers {
+					r.addNode(peer.ID)
+				}
 			}
 			close(gc.done)
 		case mm := <-mn.propc:
