@@ -8,6 +8,7 @@ import (
 // MultiNode represents a node that is participating in multiple consensus groups.
 type MultiNode interface {
 	CreateGroup(group uint64, peers []Peer, storage Storage) error
+	RemoveGroup(group uint64) error
 	Tick()
 	Campaign(ctx context.Context, group uint64) error
 	Propose(ctx context.Context, group uint64, data []byte) error
@@ -49,11 +50,18 @@ type groupCreation struct {
 	done chan struct{}
 }
 
+type groupRemoval struct {
+	id uint64
+	// TODO(bdarnell): see comment on groupCreation.done
+	done chan struct{}
+}
+
 type multiNode struct {
 	id        uint64
 	election  int
 	heartbeat int
 	groupc    chan groupCreation
+	rmgroupc  chan groupRemoval
 	propc     chan multiMessage
 	recvc     chan multiMessage
 	confc     chan multiConfChange
@@ -69,6 +77,7 @@ func newMultiNode(id uint64, election, heartbeat int) multiNode {
 		election:  election,
 		heartbeat: heartbeat,
 		groupc:    make(chan groupCreation),
+		rmgroupc:  make(chan groupRemoval),
 		propc:     make(chan multiMessage),
 		recvc:     make(chan multiMessage),
 		confc:     make(chan multiConfChange),
@@ -164,6 +173,12 @@ func (mn *multiNode) run() {
 				}
 			}
 			close(gc.done)
+
+		case gr := <-mn.rmgroupc:
+			delete(groups, gr.id)
+			delete(rds, gr.id)
+			close(gr.done)
+
 		case mm := <-mn.propc:
 			// TODO(bdarnell): single-node impl doesn't read from propc unless the group
 			// has a leader; we can't do that since we have one propc for many groups.
@@ -203,15 +218,19 @@ func (mn *multiNode) run() {
 			rds = map[uint64]Ready{}
 			advancec = mn.advancec
 		case advs := <-advancec:
-			for group, rd := range advs {
-				groups[group].commitReady(rd)
+			for groupID, rd := range advs {
+				group, ok := groups[groupID]
+				if !ok {
+					continue
+				}
+				group.commitReady(rd)
 
 				// We've been accumulating new entries in rds which may now be obsolete.
 				// Drop the old Ready object and create a new one if needed.
-				delete(rds, group)
-				newRd := groups[group].newReady()
+				delete(rds, groupID)
+				newRd := group.newReady()
 				if newRd.containsUpdates() {
-					rds[group] = newRd
+					rds[groupID] = newRd
 				}
 			}
 			advancec = nil
@@ -237,6 +256,20 @@ func (mn *multiNode) CreateGroup(id uint64, peers []Peer, storage Storage) error
 	mn.groupc <- gc
 	select {
 	case <-gc.done:
+		return nil
+	case <-mn.done:
+		return ErrStopped
+	}
+}
+
+func (mn *multiNode) RemoveGroup(id uint64) error {
+	gr := groupRemoval{
+		id:   id,
+		done: make(chan struct{}),
+	}
+	mn.rmgroupc <- gr
+	select {
+	case <-gr.done:
 		return nil
 	case <-mn.done:
 		return ErrStopped
