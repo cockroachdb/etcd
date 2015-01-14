@@ -52,13 +52,13 @@ func (st StateType) String() string {
 	return stmap[uint64(st)]
 }
 
-func (st StateType) MarshalJSON() ([]byte, error) {
-	return []byte(fmt.Sprintf("%q", st.String())), nil
+type progress struct {
+	match, next uint64
+	wait        int
 }
 
-type progress struct{ match, next uint64 }
-
 func (pr *progress) update(n uint64) {
+	pr.waitReset()
 	if pr.match < n {
 		pr.match = n
 	}
@@ -70,12 +70,13 @@ func (pr *progress) update(n uint64) {
 func (pr *progress) optimisticUpdate(n uint64) { pr.next = n + 1 }
 
 // maybeDecrTo returns false if the given to index comes from an out of order message.
-// Otherwise it decreases the progress next index and returns true.
-func (pr *progress) maybeDecrTo(to uint64) bool {
+// Otherwise it decreases the progress next index to min(rejected, last) and returns true.
+func (pr *progress) maybeDecrTo(rejected, last uint64) bool {
+	pr.waitReset()
 	if pr.match != 0 {
-		// the rejection must be stale if the progress has matched and "to"
+		// the rejection must be stale if the progress has matched and "rejected"
 		// is smaller than "match".
-		if to <= pr.match {
+		if rejected <= pr.match {
 			return false
 		}
 		// directly decrease next to match + 1
@@ -83,18 +84,30 @@ func (pr *progress) maybeDecrTo(to uint64) bool {
 		return true
 	}
 
-	// the rejection must be stale if "to" does not match next - 1
-	if pr.next-1 != to {
+	// the rejection must be stale if "rejected" does not match next - 1
+	if pr.next-1 != rejected {
 		return false
 	}
 
-	if pr.next--; pr.next < 1 {
+	if pr.next = min(rejected, last+1); pr.next < 1 {
 		pr.next = 1
 	}
 	return true
 }
 
-func (pr *progress) String() string { return fmt.Sprintf("next = %d, match = %d", pr.next, pr.match) }
+func (pr *progress) waitDecr(i int) {
+	pr.wait -= i
+	if pr.wait < 0 {
+		pr.wait = 0
+	}
+}
+func (pr *progress) waitSet(w int)    { pr.wait = w }
+func (pr *progress) waitReset()       { pr.wait = 0 }
+func (pr *progress) shouldWait() bool { return pr.match == 0 && pr.wait > 0 }
+
+func (pr *progress) String() string {
+	return fmt.Sprintf("next = %d, match = %d, wait = %v", pr.next, pr.match, pr.wait)
+}
 
 type raft struct {
 	pb.HardState
@@ -173,8 +186,6 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage
 
 func (r *raft) hasLeader() bool { return r.lead != None }
 
-func (r *raft) leader() uint64 { return r.lead }
-
 func (r *raft) softState() *SoftState { return &SoftState{Lead: r.lead, RaftState: r.state} }
 
 func (r *raft) q() int { return len(r.prs)/2 + 1 }
@@ -203,6 +214,10 @@ func (r *raft) send(m pb.Message) {
 // sendAppend sends RRPC, with entries to the given peer.
 func (r *raft) sendAppend(to uint64) {
 	pr := r.prs[to]
+	if pr.shouldWait() {
+		log.Printf("raft: %x ignored sending %s to %x [%s]", r.id, pb.MsgApp, to, pr)
+		return
+	}
 	m := pb.Message{}
 	m.To = to
 	if r.needSnapshot(pr.next) {
@@ -218,6 +233,7 @@ func (r *raft) sendAppend(to uint64) {
 		sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term
 		log.Printf("raft: %x [firstindex: %d, commit: %d] sent snapshot[index: %d, term: %d] to %x [%s]",
 			r.id, r.raftLog.firstIndex(), r.Commit, sindex, sterm, to, pr)
+		pr.waitSet(r.electionTimeout)
 	} else {
 		m.Type = pb.MsgApp
 		m.Index = pr.next - 1
@@ -228,6 +244,11 @@ func (r *raft) sendAppend(to uint64) {
 		// has been matched.
 		if n := len(m.Entries); pr.match != 0 && n != 0 {
 			pr.optimisticUpdate(m.Entries[n-1].Index)
+		} else if pr.match == 0 {
+			// TODO (xiangli): better way to find out if the follower is in good path or not
+			// a follower might be in bad path even if match != 0, since we optimistically
+			// increase the next.
+			pr.waitSet(r.heartbeatTimeout)
 		}
 	}
 	r.send(m)
@@ -268,6 +289,7 @@ func (r *raft) bcastHeartbeat() {
 			continue
 		}
 		r.sendHeartbeat(i)
+		r.prs[i].waitDecr(r.heartbeatTimeout)
 	}
 }
 
@@ -460,9 +482,10 @@ func stepLeader(r *raft, m pb.Message) {
 		r.bcastAppend()
 	case pb.MsgAppResp:
 		if m.Reject {
-			log.Printf("raft: %x received msgApp rejection from %x for index %d",
-				r.id, m.From, m.Index)
-			if r.prs[m.From].maybeDecrTo(m.Index) {
+			log.Printf("raft: %x received msgApp rejection(lastindex: %d) from %x for index %d",
+				r.id, m.RejectHint, m.From, m.Index)
+			if r.prs[m.From].maybeDecrTo(m.Index, m.RejectHint) {
+				log.Printf("raft: %x decreased progress of %x to [%s]", r.id, m.From, r.prs[m.From])
 				r.sendAppend(m.From)
 			}
 		} else {
@@ -550,7 +573,7 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 	} else {
 		log.Printf("raft: %x [logterm: %d, index: %d] rejected msgApp [logterm: %d, index: %d] from %x",
 			r.id, r.raftLog.term(m.Index), m.Index, m.LogTerm, m.Index, m.From)
-		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: m.Index, Reject: true})
+		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: m.Index, Reject: true, RejectHint: r.raftLog.lastIndex()})
 	}
 }
 
@@ -571,8 +594,8 @@ func (r *raft) handleSnapshot(m pb.Message) {
 	}
 }
 
-// restore recovers the statemachine from a snapshot. It restores the log and the
-// configuration of statemachine.
+// restore recovers the state machine from a snapshot. It restores the log and the
+// configuration of state machine.
 func (r *raft) restore(s pb.Snapshot) bool {
 	if s.Metadata.Index <= r.raftLog.committed {
 		return false

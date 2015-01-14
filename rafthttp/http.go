@@ -40,34 +40,25 @@ var (
 	RaftStreamPrefix = path.Join(RaftPrefix, "stream")
 )
 
-type Processor interface {
-	Process(ctx context.Context, m raftpb.Message) error
-}
-
-type SenderFinder interface {
-	// Sender returns the sender of the given id.
-	Sender(id types.ID) Sender
-}
-
-func NewHandler(p Processor, cid types.ID) http.Handler {
+func NewHandler(r Raft, cid types.ID) http.Handler {
 	return &handler{
-		p:   p,
+		r:   r,
 		cid: cid,
 	}
 }
 
 // NewStreamHandler returns a handler which initiates streamer when receiving
 // stream request from follower.
-func NewStreamHandler(finder SenderFinder, id, cid types.ID) http.Handler {
+func NewStreamHandler(tr *transport, id, cid types.ID) http.Handler {
 	return &streamHandler{
-		finder: finder,
-		id:     id,
-		cid:    cid,
+		tr:  tr,
+		id:  id,
+		cid: cid,
 	}
 }
 
 type handler struct {
-	p   Processor
+	r   Raft
 	cid types.ID
 }
 
@@ -103,7 +94,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "error unmarshaling raft message", http.StatusBadRequest)
 		return
 	}
-	if err := h.p.Process(context.TODO(), m); err != nil {
+	if err := h.r.Process(context.TODO(), m); err != nil {
 		switch v := err.(type) {
 		case writerToResponse:
 			v.WriteTo(w)
@@ -117,9 +108,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type streamHandler struct {
-	finder SenderFinder
-	id     types.ID
-	cid    types.ID
+	tr  *transport
+	id  types.ID
+	cid types.ID
 }
 
 func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -136,8 +127,8 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid path", http.StatusNotFound)
 		return
 	}
-	s := h.finder.Sender(from)
-	if s == nil {
+	p := h.tr.Peer(from)
+	if p == nil {
 		log.Printf("rafthttp: fail to find sender %s", from)
 		http.Error(w, "error sender not found", http.StatusNotFound)
 		return
@@ -168,14 +159,14 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.(http.Flusher).Flush()
 
-	done, err := s.StartStreaming(w.(WriteFlusher), from, term)
+	sw := newStreamWriter(w.(WriteFlusher), from, term)
+	err = p.attachStream(sw)
 	if err != nil {
-		log.Printf("rafthttp: streaming request ignored due to start streaming error: %v", err)
-		// TODO: consider http status and info here
-		http.Error(w, "error enable streaming", http.StatusInternalServerError)
+		log.Printf("rafthttp: %v", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	<-done
+	<-sw.stopNotify()
 }
 
 type writerToResponse interface {

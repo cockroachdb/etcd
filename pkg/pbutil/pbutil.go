@@ -39,3 +39,12 @@ func MustUnmarshal(um Unmarshaler, data []byte) {
 		log.Panicf("unmarshal protobuf type should never fail: %v", err)
 	}
 }
+
+func GetBool(v *bool) (vv bool, set bool) {
+	if v == nil {
+		return false, false
+	}
+	return *v, true
+}
+
+func Boolp(b bool) *bool { return &b }

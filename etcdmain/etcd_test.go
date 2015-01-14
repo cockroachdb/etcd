@@ -17,19 +17,10 @@
 package etcdmain
 
 import (
-	"net/url"
 	"testing"
 
-	"github.com/coreos/etcd/pkg/types"
+	"github.com/coreos/etcd/pkg/testutil"
 )
-
-func mustNewURLs(t *testing.T, urls []string) []url.URL {
-	u, err := types.NewURLs(urls)
-	if err != nil {
-		t.Fatalf("unexpected new urls error: %v", err)
-	}
-	return u
-}
 
 func TestGenClusterString(t *testing.T) {
 	tests := []struct {
@@ -47,7 +38,7 @@ func TestGenClusterString(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		urls := mustNewURLs(t, tt.urls)
+		urls := testutil.MustNewURLs(t, tt.urls)
 		str := genClusterString(tt.token, urls)
 		if str != tt.wstr {
 			t.Errorf("#%d: cluster = %s, want %s", i, str, tt.wstr)

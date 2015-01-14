@@ -18,17 +18,17 @@ package command
 
 import (
 	"log"
-	"math/rand"
 	"os"
 	"path"
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/codegangsta/cli"
-	"github.com/coreos/etcd/etcdserver"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/coreos/etcd/pkg/idutil"
 	"github.com/coreos/etcd/pkg/pbutil"
 	"github.com/coreos/etcd/snap"
 	"github.com/coreos/etcd/wal"
+	"github.com/coreos/etcd/wal/walpb"
 )
 
 func NewBackupCommand() cli.Command {
@@ -58,16 +58,16 @@ func handleBackup(c *cli.Context) {
 	if err != nil && err != snap.ErrNoSnapshot {
 		log.Fatal(err)
 	}
-	var index uint64
+	var walsnap walpb.Snapshot
 	if snapshot != nil {
-		index = snapshot.Metadata.Index
+		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
 		newss := snap.New(destSnap)
 		if err := newss.SaveSnap(*snapshot); err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	w, err := wal.OpenNotInUse(srcWAL, index)
+	w, err := wal.OpenNotInUse(srcWAL, walsnap)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -78,9 +78,9 @@ func handleBackup(c *cli.Context) {
 	}
 	var metadata etcdserverpb.Metadata
 	pbutil.MustUnmarshal(&metadata, wmetadata)
-	rand.Seed(time.Now().UnixNano())
-	metadata.NodeID = etcdserver.GenID()
-	metadata.ClusterID = etcdserver.GenID()
+	idgen := idutil.NewGenerator(0, time.Now())
+	metadata.NodeID = idgen.Next()
+	metadata.ClusterID = idgen.Next()
 
 	neww, err := wal.Create(destWAL, pbutil.MustMarshal(&metadata))
 	if err != nil {

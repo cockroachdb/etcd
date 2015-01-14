@@ -26,10 +26,15 @@ import (
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/wal"
+	"github.com/coreos/etcd/wal/walpb"
 )
 
-func restartAsStandaloneNode(cfg *ServerConfig, index uint64, snapshot *raftpb.Snapshot) (types.ID, raft.Node, *raft.MemoryStorage, *wal.WAL) {
-	w, id, cid, st, ents := readWAL(cfg.WALDir(), index)
+func restartAsStandaloneNode(cfg *ServerConfig, snapshot *raftpb.Snapshot) (types.ID, raft.Node, *raft.MemoryStorage, *wal.WAL) {
+	var walsnap walpb.Snapshot
+	if snapshot != nil {
+		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
+	}
+	w, id, cid, st, ents := readWAL(cfg.WALDir(), walsnap)
 	cfg.Cluster.SetID(cid)
 
 	// discard the previously uncommitted entries
@@ -46,11 +51,9 @@ func restartAsStandaloneNode(cfg *ServerConfig, index uint64, snapshot *raftpb.S
 	ents = append(ents, toAppEnts...)
 
 	// force commit newly appended entries
-	for _, e := range toAppEnts {
-		err := w.SaveEntry(&e)
-		if err != nil {
-			log.Fatalf("etcdserver: %v", err)
-		}
+	err := w.Save(raftpb.HardState{}, toAppEnts)
+	if err != nil {
+		log.Fatalf("etcdserver: %v", err)
 	}
 	if len(ents) != 0 {
 		st.Commit = ents[len(ents)-1].Index

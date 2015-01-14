@@ -244,19 +244,19 @@ func (n *node) run(r *raft) {
 			}
 		}
 
-		if lead != r.leader() {
+		if lead != r.lead {
 			if r.hasLeader() {
 				if lead == None {
-					log.Printf("raft.node: %x elected leader %x at term %d", r.id, r.leader(), r.Term)
+					log.Printf("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
 				} else {
-					log.Printf("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.leader(), r.Term)
+					log.Printf("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.lead, r.Term)
 				}
 				propc = n.propc
 			} else {
 				log.Printf("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
 				propc = nil
 			}
-			lead = r.leader()
+			lead = r.lead
 		}
 
 		select {
@@ -284,6 +284,11 @@ func (n *node) run(r *raft) {
 			case pb.ConfChangeAddNode:
 				r.addNode(cc.NodeID)
 			case pb.ConfChangeRemoveNode:
+				// block incoming proposal when local node is
+				// removed
+				if cc.NodeID == r.id {
+					n.propc = nil
+				}
 				r.removeNode(cc.NodeID)
 			case pb.ConfChangeUpdateNode:
 				r.resetPendingConf()

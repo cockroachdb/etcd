@@ -70,60 +70,69 @@ func TestProgressUpdate(t *testing.T) {
 		}
 		p.update(tt.update)
 		if p.match != tt.wm {
-			t.Errorf("#%d: match=%d, want %d", i, p.match, tt.wm)
+			t.Errorf("#%d: match= %d, want %d", i, p.match, tt.wm)
 		}
 		if p.next != tt.wn {
-			t.Errorf("#%d: next=%d, want %d", i, p.next, tt.wn)
+			t.Errorf("#%d: next= %d, want %d", i, p.next, tt.wn)
 		}
 	}
 }
 
 func TestProgressMaybeDecr(t *testing.T) {
 	tests := []struct {
-		m  uint64
-		n  uint64
-		to uint64
+		m        uint64
+		n        uint64
+		rejected uint64
+		last     uint64
 
 		w  bool
 		wn uint64
 	}{
 		{
 			// match != 0 is always false
-			1, 0, 0, false, 0,
+			1, 0, 0, 0, false, 0,
 		},
 		{
 			// match != 0 and to is greater than match
 			// directly decrease to match+1
-			5, 10, 5, false, 10,
+			5, 10, 5, 5, false, 10,
 		},
 		{
 			// match != 0 and to is greater than match
 			// directly decrease to match+1
-			5, 10, 4, false, 10,
+			5, 10, 4, 4, false, 10,
 		},
 		{
 			// match != 0 and to is not greater than match
-			5, 10, 9, true, 6,
+			5, 10, 9, 9, true, 6,
 		},
 		{
-			// next-1 != to is always false
-			0, 0, 0, false, 0,
+			// next-1 != rejected is always false
+			0, 0, 0, 0, false, 0,
 		},
 		{
-			// next-1 != to is always false
-			0, 10, 5, false, 10,
-		},
-		{
-			// next>1 = decremented by 1
-			0, 10, 9, true, 9,
+			// next-1 != rejected is always false
+			0, 10, 5, 5, false, 10,
 		},
 		{
 			// next>1 = decremented by 1
-			0, 2, 1, true, 1,
+			0, 10, 9, 9, true, 9,
+		},
+		{
+			// next>1 = decremented by 1
+			0, 2, 1, 1, true, 1,
 		},
 		{
 			// next<=1 = reset to 1
-			0, 1, 0, true, 1,
+			0, 1, 0, 0, true, 1,
+		},
+		{
+			// decrease to min(rejected, last+1)
+			0, 10, 9, 2, true, 3,
+		},
+		{
+			// rejected < 1, reset to 1
+			0, 10, 9, 0, true, 1,
 		},
 	}
 	for i, tt := range tests {
@@ -131,15 +140,83 @@ func TestProgressMaybeDecr(t *testing.T) {
 			match: tt.m,
 			next:  tt.n,
 		}
-		if g := p.maybeDecrTo(tt.to); g != tt.w {
-			t.Errorf("#%d: maybeDecrTo=%t, want %t", i, g, tt.w)
+		if g := p.maybeDecrTo(tt.rejected, tt.last); g != tt.w {
+			t.Errorf("#%d: maybeDecrTo= %t, want %t", i, g, tt.w)
 		}
 		if gm := p.match; gm != tt.m {
-			t.Errorf("#%d: match=%d, want %d", i, gm, tt.m)
+			t.Errorf("#%d: match= %d, want %d", i, gm, tt.m)
 		}
 		if gn := p.next; gn != tt.wn {
-			t.Errorf("#%d: next=%d, want %d", i, gn, tt.wn)
+			t.Errorf("#%d: next= %d, want %d", i, gn, tt.wn)
 		}
+	}
+}
+
+func TestProgressShouldWait(t *testing.T) {
+	tests := []struct {
+		m    uint64
+		wait int
+
+		w bool
+	}{
+		// match != 0 is always not wait
+		{1, 0, false},
+		{1, 1, false},
+		{0, 1, true},
+		{0, 0, false},
+	}
+	for i, tt := range tests {
+		p := &progress{
+			match: tt.m,
+			wait:  tt.wait,
+		}
+		if g := p.shouldWait(); g != tt.w {
+			t.Errorf("#%d: shouldwait = %t, want %t", i, g, tt.w)
+		}
+	}
+}
+
+// TestProgressWaitReset ensures that progress.Update and progress.DercTo
+// will reset progress.wait.
+func TestProgressWaitReset(t *testing.T) {
+	p := &progress{
+		wait: 1,
+	}
+	p.maybeDecrTo(1, 1)
+	if p.wait != 0 {
+		t.Errorf("wait= %d, want 0", p.wait)
+	}
+	p.wait = 1
+	p.update(2)
+	if p.wait != 0 {
+		t.Errorf("wait= %d, want 0", p.wait)
+	}
+}
+
+// TestProgressDecr ensures raft.heartbeat decreases progress.wait by heartbeat.
+func TestProgressDecr(t *testing.T) {
+	r := newRaft(1, []uint64{1, 2}, 5, 1, NewMemoryStorage())
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.prs[2].wait = r.heartbeatTimeout * 2
+
+	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgBeat})
+	if r.prs[2].wait != r.heartbeatTimeout*(2-1) {
+		t.Errorf("wait = %d, want %d", r.prs[2].wait, r.heartbeatTimeout*(2-1))
+	}
+}
+
+func TestProgressWait(t *testing.T) {
+	r := newRaft(1, []uint64{1, 2}, 5, 1, NewMemoryStorage())
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("somedata")}}})
+	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("somedata")}}})
+	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("somedata")}}})
+
+	ms := r.readMessages()
+	if len(ms) != 1 {
+		t.Errorf("len(ms) = %d, want 1", len(ms))
 	}
 }
 
@@ -269,7 +346,7 @@ func TestCannotCommitWithoutNewTermEntry(t *testing.T) {
 	// avoid committing ChangeTerm proposal
 	tt.ignore(pb.MsgApp)
 
-	// elect 1 as the new leader with term 2
+	// elect 2 as the new leader with term 2
 	tt.send(pb.Message{From: 2, To: 2, Type: pb.MsgHup})
 
 	// no log entries from previous term should be committed
@@ -279,10 +356,11 @@ func TestCannotCommitWithoutNewTermEntry(t *testing.T) {
 	}
 
 	tt.recover()
-
-	// still be able to append a entry
+	// send heartbeat; reset wait
+	tt.send(pb.Message{From: 2, To: 2, Type: pb.MsgBeat})
+	// append an entry at current term
 	tt.send(pb.Message{From: 2, To: 2, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("some data")}}})
-
+	// expect the committed to be advanced
 	if sm.raftLog.committed != 5 {
 		t.Errorf("committed = %d, want %d", sm.raftLog.committed, 5)
 	}
@@ -378,10 +456,14 @@ func TestCandidateConcede(t *testing.T) {
 
 	// heal the partition
 	tt.recover()
+	// send heartbeat; reset wait
+	tt.send(pb.Message{From: 3, To: 3, Type: pb.MsgBeat})
 
 	data := []byte("force follower")
-	// send a proposal to 2 to flush out a MsgApp to 0
+	// send a proposal to 3 to flush out a MsgApp to 1
 	tt.send(pb.Message{From: 3, To: 3, Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
+	// send heartbeat; flush out commit
+	tt.send(pb.Message{From: 3, To: 3, Type: pb.MsgBeat})
 
 	a := tt.peers[1].(*raft)
 	if g := a.state; g != StateFollower {
@@ -425,18 +507,21 @@ func TestOldMessages(t *testing.T) {
 	tt.send(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
 	tt.send(pb.Message{From: 2, To: 2, Type: pb.MsgHup})
 	tt.send(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
-	// pretend we're an old leader trying to make progress
-	tt.send(pb.Message{From: 1, To: 1, Type: pb.MsgApp, Term: 1, Entries: []pb.Entry{{Term: 1}}})
+	// pretend we're an old leader trying to make progress; this entry is expected to be ignored.
+	tt.send(pb.Message{From: 2, To: 1, Type: pb.MsgApp, Term: 2, Entries: []pb.Entry{{Index: 3, Term: 2}}})
+	// commit a new entry
+	tt.send(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("somedata")}}})
 
 	l := &raftLog{
 		storage: &MemoryStorage{
 			ents: []pb.Entry{
 				{}, {Data: nil, Term: 1, Index: 1},
 				{Data: nil, Term: 2, Index: 2}, {Data: nil, Term: 3, Index: 3},
+				{Data: []byte("somedata"), Term: 3, Index: 4},
 			},
 		},
-		unstable:  unstable{offset: 4},
-		committed: 3,
+		unstable:  unstable{offset: 5},
+		committed: 4,
 	}
 	base := ltoa(l)
 	for i, p := range tt.peers {
@@ -925,7 +1010,7 @@ func TestLeaderAppResp(t *testing.T) {
 		sm.becomeCandidate()
 		sm.becomeLeader()
 		sm.readMessages()
-		sm.Step(pb.Message{From: 2, Type: pb.MsgAppResp, Index: tt.index, Term: sm.Term, Reject: tt.reject})
+		sm.Step(pb.Message{From: 2, Type: pb.MsgAppResp, Index: tt.index, Term: sm.Term, Reject: tt.reject, RejectHint: tt.index})
 
 		p := sm.prs[2]
 		if p.match != tt.wmatch {

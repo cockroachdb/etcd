@@ -27,6 +27,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,9 +50,18 @@ const (
 	requestTimeout = 2 * time.Second
 )
 
+var (
+	electionTicks = 10
+)
+
 func init() {
 	// open microsecond-level time log for integration test debugging
 	log.SetFlags(log.Ltime | log.Lmicroseconds | log.Lshortfile)
+	if t := os.Getenv("ETCD_ELECTION_TIMEOUT_TICKS"); t != "" {
+		if i, err := strconv.ParseInt(t, 10, 64); err == nil {
+			electionTicks = int(i)
+		}
+	}
 }
 
 func TestClusterOf1(t *testing.T) { testCluster(t, 1) }
@@ -113,12 +123,50 @@ func testDecreaseClusterSize(t *testing.T, size int) {
 	defer c.Terminate(t)
 
 	// TODO: remove the last but one member
-	for i := 0; i < size-2; i++ {
+	for i := 0; i < size-1; i++ {
 		id := c.Members[len(c.Members)-1].s.ID()
 		c.RemoveMember(t, uint64(id))
 		c.waitLeader(t, c.Members)
 	}
 	clusterMustProgress(t, c.Members)
+}
+
+func TestForceNewCluster(t *testing.T) {
+	c := NewCluster(t, 3)
+	c.Launch(t)
+	cc := mustNewHTTPClient(t, []string{c.Members[0].URL()})
+	kapi := client.NewKeysAPI(cc)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	resp, err := kapi.Create(ctx, "/foo", "bar", -1)
+	if err != nil {
+		t.Fatalf("unexpected create error: %v", err)
+	}
+	cancel()
+	// ensure create has been applied in this machine
+	ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
+	if _, err := kapi.Watch("foo", resp.Node.ModifiedIndex).Next(ctx); err != nil {
+		t.Fatalf("unexpected watch error: %v", err)
+	}
+	cancel()
+
+	c.Members[0].Stop(t)
+	c.Members[1].Terminate(t)
+	c.Members[2].Terminate(t)
+	c.Members[0].ForceNewCluster = true
+	err = c.Members[0].Restart(t)
+	if err != nil {
+		t.Fatalf("unexpected ForceRestart error: %v", err)
+	}
+	defer c.Members[0].Terminate(t)
+
+	// ensure force restart keep the old data, and new cluster can make progress
+	cc = mustNewHTTPClient(t, []string{c.Members[0].URL()})
+	kapi = client.NewKeysAPI(cc)
+	_, err = kapi.Get(context.TODO(), "/foo")
+	if err != nil {
+		t.Errorf("unexpected get error: %v", err)
+	}
+	clusterMustProgress(t, c.Members[:1])
 }
 
 // clusterMustProgress ensures that cluster can make progress. It creates
@@ -298,8 +346,9 @@ func (c *cluster) RemoveMember(t *testing.T, id uint64) {
 			select {
 			case <-m.s.StopNotify():
 				m.Terminate(t)
-			case <-time.After(time.Second):
-				t.Fatalf("failed to remove member %s in one second", m.s.ID())
+			// stop delay / election timeout + 1s disk and network delay
+			case <-time.After(time.Duration(electionTicks)*tickDuration + time.Second):
+				t.Fatalf("failed to remove member %s in time", m.s.ID())
 			}
 		}
 	}
@@ -431,6 +480,7 @@ func mustNewMember(t *testing.T, name string) *member {
 	}
 	m.NewCluster = true
 	m.Transport = mustNewTransport(t)
+	m.ElectionTimeoutTicks = electionTicks
 	return m
 }
 
@@ -460,6 +510,7 @@ func (m *member) Clone(t *testing.T) *member {
 		panic(err)
 	}
 	mm.Transport = mustNewTransport(t)
+	mm.ElectionTimeoutTicks = m.ElectionTimeoutTicks
 	return mm
 }
 
@@ -474,7 +525,7 @@ func (m *member) Launch() error {
 	m.s.SyncTicker = time.Tick(500 * time.Millisecond)
 	m.s.Start()
 
-	m.raftHandler = &testutil.PauseableHandler{Next: etcdhttp.NewPeerHandler(m.s)}
+	m.raftHandler = &testutil.PauseableHandler{Next: etcdhttp.NewPeerHandler(m.s.Cluster, m.s.RaftHandler())}
 
 	for _, ln := range m.PeerListeners {
 		hs := &httptest.Server{

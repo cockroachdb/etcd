@@ -92,9 +92,10 @@ type serverRecorder struct {
 	actions []action
 }
 
-func (s *serverRecorder) Start()       {}
-func (s *serverRecorder) Stop()        {}
-func (s *serverRecorder) ID() types.ID { return types.ID(1) }
+func (s *serverRecorder) Start()           {}
+func (s *serverRecorder) Stop()            {}
+func (s *serverRecorder) Leader() types.ID { return types.ID(1) }
+func (s *serverRecorder) ID() types.ID     { return types.ID(1) }
 func (s *serverRecorder) Do(_ context.Context, r etcdserverpb.Request) (etcdserver.Response, error) {
 	s.actions = append(s.actions, action{name: "Do", params: []interface{}{r}})
 	return etcdserver.Response{}, nil
@@ -139,9 +140,10 @@ type resServer struct {
 	res etcdserver.Response
 }
 
-func (rs *resServer) Start()       {}
-func (rs *resServer) Stop()        {}
-func (rs *resServer) ID() types.ID { return types.ID(1) }
+func (rs *resServer) Start()           {}
+func (rs *resServer) Stop()            {}
+func (rs *resServer) ID() types.ID     { return types.ID(1) }
+func (rs *resServer) Leader() types.ID { return types.ID(1) }
 func (rs *resServer) Do(_ context.Context, _ etcdserverpb.Request) (etcdserver.Response, error) {
 	return rs.res, nil
 }
@@ -312,7 +314,7 @@ func TestBadParseRequest(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		got, err := parseKeyRequest(tt.in, 1234, clockwork.NewFakeClock())
+		got, err := parseKeyRequest(tt.in, clockwork.NewFakeClock())
 		if err == nil {
 			t.Errorf("#%d: unexpected nil error!", i)
 			continue
@@ -343,7 +345,6 @@ func TestGoodParseRequest(t *testing.T) {
 			// good prefix, all other values default
 			mustNewRequest(t, "foo"),
 			etcdserverpb.Request{
-				ID:     1234,
 				Method: "GET",
 				Path:   path.Join(etcdserver.StoreKeysPrefix, "/foo"),
 			},
@@ -356,7 +357,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{"value": []string{"some_value"}},
 			),
 			etcdserverpb.Request{
-				ID:     1234,
 				Method: "PUT",
 				Val:    "some_value",
 				Path:   path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -370,7 +370,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{"prevIndex": []string{"98765"}},
 			),
 			etcdserverpb.Request{
-				ID:        1234,
 				Method:    "PUT",
 				PrevIndex: 98765,
 				Path:      path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -384,7 +383,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{"recursive": []string{"true"}},
 			),
 			etcdserverpb.Request{
-				ID:        1234,
 				Method:    "PUT",
 				Recursive: true,
 				Path:      path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -398,7 +396,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{"sorted": []string{"true"}},
 			),
 			etcdserverpb.Request{
-				ID:     1234,
 				Method: "PUT",
 				Sorted: true,
 				Path:   path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -412,7 +409,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{"quorum": []string{"true"}},
 			),
 			etcdserverpb.Request{
-				ID:     1234,
 				Method: "PUT",
 				Quorum: true,
 				Path:   path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -422,7 +418,6 @@ func TestGoodParseRequest(t *testing.T) {
 			// wait specified
 			mustNewRequest(t, "foo?wait=true"),
 			etcdserverpb.Request{
-				ID:     1234,
 				Method: "GET",
 				Wait:   true,
 				Path:   path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -432,7 +427,6 @@ func TestGoodParseRequest(t *testing.T) {
 			// empty TTL specified
 			mustNewRequest(t, "foo?ttl="),
 			etcdserverpb.Request{
-				ID:         1234,
 				Method:     "GET",
 				Path:       path.Join(etcdserver.StoreKeysPrefix, "/foo"),
 				Expiration: 0,
@@ -442,7 +436,6 @@ func TestGoodParseRequest(t *testing.T) {
 			// non-empty TTL specified
 			mustNewRequest(t, "foo?ttl=5678"),
 			etcdserverpb.Request{
-				ID:         1234,
 				Method:     "GET",
 				Path:       path.Join(etcdserver.StoreKeysPrefix, "/foo"),
 				Expiration: fc.Now().Add(5678 * time.Second).UnixNano(),
@@ -452,7 +445,6 @@ func TestGoodParseRequest(t *testing.T) {
 			// zero TTL specified
 			mustNewRequest(t, "foo?ttl=0"),
 			etcdserverpb.Request{
-				ID:         1234,
 				Method:     "GET",
 				Path:       path.Join(etcdserver.StoreKeysPrefix, "/foo"),
 				Expiration: fc.Now().UnixNano(),
@@ -462,7 +454,6 @@ func TestGoodParseRequest(t *testing.T) {
 			// dir specified
 			mustNewRequest(t, "foo?dir=true"),
 			etcdserverpb.Request{
-				ID:     1234,
 				Method: "GET",
 				Dir:    true,
 				Path:   path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -472,7 +463,6 @@ func TestGoodParseRequest(t *testing.T) {
 			// dir specified negatively
 			mustNewRequest(t, "foo?dir=false"),
 			etcdserverpb.Request{
-				ID:     1234,
 				Method: "GET",
 				Dir:    false,
 				Path:   path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -486,7 +476,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{"prevExist": []string{"true"}},
 			),
 			etcdserverpb.Request{
-				ID:        1234,
 				Method:    "PUT",
 				PrevExist: boolp(true),
 				Path:      path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -500,7 +489,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{"prevExist": []string{"false"}},
 			),
 			etcdserverpb.Request{
-				ID:        1234,
 				Method:    "PUT",
 				PrevExist: boolp(false),
 				Path:      path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -518,7 +506,6 @@ func TestGoodParseRequest(t *testing.T) {
 				},
 			),
 			etcdserverpb.Request{
-				ID:        1234,
 				Method:    "PUT",
 				PrevExist: boolp(true),
 				PrevValue: "previous value",
@@ -534,7 +521,6 @@ func TestGoodParseRequest(t *testing.T) {
 				url.Values{},
 			),
 			etcdserverpb.Request{
-				ID:        1234,
 				Method:    "PUT",
 				PrevValue: "woof",
 				Path:      path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -550,7 +536,6 @@ func TestGoodParseRequest(t *testing.T) {
 				},
 			),
 			etcdserverpb.Request{
-				ID:        1234,
 				Method:    "PUT",
 				PrevValue: "miaow",
 				Path:      path.Join(etcdserver.StoreKeysPrefix, "/foo"),
@@ -559,7 +544,7 @@ func TestGoodParseRequest(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		got, err := parseKeyRequest(tt.in, 1234, fc)
+		got, err := parseKeyRequest(tt.in, fc)
 		if err != nil {
 			t.Errorf("#%d: err = %v, want %v", i, err, nil)
 		}
@@ -594,6 +579,57 @@ func TestServeMembers(t *testing.T) {
 		{membersPrefix + "/", http.StatusOK, "application/json", wmc + "\n"},
 		{path.Join(membersPrefix, "100"), http.StatusNotFound, "application/json", `{"message":"Not found"}`},
 		{path.Join(membersPrefix, "foobar"), http.StatusNotFound, "application/json", `{"message":"Not found"}`},
+	}
+
+	for i, tt := range tests {
+		req, err := http.NewRequest("GET", mustNewURL(t, tt.path).String(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+
+		if rw.Code != tt.wcode {
+			t.Errorf("#%d: code=%d, want %d", i, rw.Code, tt.wcode)
+		}
+		if gct := rw.Header().Get("Content-Type"); gct != tt.wct {
+			t.Errorf("#%d: content-type = %s, want %s", i, gct, tt.wct)
+		}
+		gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+		wcid := cluster.ID().String()
+		if gcid != wcid {
+			t.Errorf("#%d: cid = %s, want %s", i, gcid, wcid)
+		}
+		if rw.Body.String() != tt.wbody {
+			t.Errorf("#%d: body = %q, want %q", i, rw.Body.String(), tt.wbody)
+		}
+	}
+}
+
+// TODO: consolidate **ALL** fake server implementations and add no leader test case.
+func TestServeLeader(t *testing.T) {
+	memb1 := etcdserver.Member{ID: 1, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8080"}}}
+	memb2 := etcdserver.Member{ID: 2, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8081"}}}
+	cluster := &fakeCluster{
+		id:      1,
+		members: map[uint64]*etcdserver.Member{1: &memb1, 2: &memb2},
+	}
+	h := &membersHandler{
+		server:      &serverRecorder{},
+		clock:       clockwork.NewFakeClock(),
+		clusterInfo: cluster,
+	}
+
+	wmc := string(`{"id":"1","name":"","peerURLs":[],"clientURLs":["http://localhost:8080"]}`)
+
+	tests := []struct {
+		path  string
+		wcode int
+		wct   string
+		wbody string
+	}{
+		{membersPrefix + "leader", http.StatusOK, "application/json", wmc + "\n"},
+		// TODO: add no leader case
 	}
 
 	for i, tt := range tests {

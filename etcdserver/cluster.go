@@ -29,7 +29,6 @@ import (
 	"strings"
 	"sync"
 
-	etcdErr "github.com/coreos/etcd/error"
 	"github.com/coreos/etcd/pkg/flags"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft/raftpb"
@@ -135,12 +134,6 @@ func (c *Cluster) Members() []*Member {
 	return []*Member(sms)
 }
 
-type SortableMemberSlice []*Member
-
-func (s SortableMemberSlice) Len() int           { return len(s) }
-func (s SortableMemberSlice) Less(i, j int) bool { return s[i].ID < s[j].ID }
-func (s SortableMemberSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-
 func (c *Cluster) Member(id types.ID) *Member {
 	c.Lock()
 	defer c.Unlock()
@@ -181,25 +174,23 @@ func (c *Cluster) IsIDRemoved(id types.ID) bool {
 	return c.removed[id]
 }
 
-// PeerURLs returns a list of all peer addresses. Each address is prefixed
-// with the scheme (currently "http://"). The returned list is sorted in
-// ascending lexicographical order.
+// PeerURLs returns a list of all peer addresses.
+// The returned list is sorted in ascending lexicographical order.
 func (c *Cluster) PeerURLs() []string {
 	c.Lock()
 	defer c.Unlock()
-	endpoints := make([]string, 0)
+	urls := make([]string, 0)
 	for _, p := range c.members {
 		for _, addr := range p.PeerURLs {
-			endpoints = append(endpoints, addr)
+			urls = append(urls, addr)
 		}
 	}
-	sort.Strings(endpoints)
-	return endpoints
+	sort.Strings(urls)
+	return urls
 }
 
-// ClientURLs returns a list of all client addresses. Each address is prefixed
-// with the scheme (currently "http://"). The returned list is sorted in
-// ascending lexicographical order.
+// ClientURLs returns a list of all client addresses.
+// The returned list is sorted in ascending lexicographical order.
 func (c *Cluster) ClientURLs() []string {
 	c.Lock()
 	defer c.Unlock()
@@ -336,52 +327,25 @@ func (c *Cluster) RemoveMember(id types.ID) {
 	c.removed[id] = true
 }
 
-func (c *Cluster) UpdateMemberAttributes(id types.ID, attr Attributes) {
+func (c *Cluster) UpdateAttributes(id types.ID, attr Attributes) {
 	c.Lock()
 	defer c.Unlock()
 	c.members[id].Attributes = attr
+	// TODO: update store in this function
 }
 
-func (c *Cluster) UpdateMember(nm *Member) {
+func (c *Cluster) UpdateRaftAttributes(id types.ID, raftAttr RaftAttributes) {
 	c.Lock()
 	defer c.Unlock()
-	b, err := json.Marshal(nm.RaftAttributes)
+	b, err := json.Marshal(raftAttr)
 	if err != nil {
 		log.Panicf("marshal raftAttributes should never fail: %v", err)
 	}
-	p := path.Join(memberStoreKey(nm.ID), raftAttributesSuffix)
+	p := path.Join(memberStoreKey(id), raftAttributesSuffix)
 	if _, err := c.store.Update(p, string(b), store.Permanent); err != nil {
 		log.Panicf("update raftAttributes should never fail: %v", err)
 	}
-	c.members[nm.ID].RaftAttributes = nm.RaftAttributes
-}
-
-// nodeToMember builds member through a store node.
-// the child nodes of the given node should be sorted by key.
-func nodeToMember(n *store.NodeExtern) (*Member, error) {
-	m := &Member{ID: mustParseMemberIDFromKey(n.Key)}
-	attrs := make(map[string][]byte)
-	raftAttrKey := path.Join(n.Key, raftAttributesSuffix)
-	attrKey := path.Join(n.Key, attributesSuffix)
-	for _, nn := range n.Nodes {
-		if nn.Key != raftAttrKey && nn.Key != attrKey {
-			return nil, fmt.Errorf("unknown key %q", nn.Key)
-		}
-		attrs[nn.Key] = []byte(*nn.Value)
-	}
-	if data := attrs[raftAttrKey]; data != nil {
-		if err := json.Unmarshal(data, &m.RaftAttributes); err != nil {
-			return nil, fmt.Errorf("unmarshal raftAttributes error: %v", err)
-		}
-	} else {
-		return nil, fmt.Errorf("raftAttributes key doesn't exist")
-	}
-	if data := attrs[attrKey]; data != nil {
-		if err := json.Unmarshal(data, &m.Attributes); err != nil {
-			return m, fmt.Errorf("unmarshal attributes error: %v", err)
-		}
-	}
-	return m, nil
+	c.members[id].RaftAttributes = raftAttr
 }
 
 func membersFromStore(st store.Store) (map[types.ID]*Member, map[types.ID]bool) {
@@ -439,9 +403,4 @@ func ValidateClusterAndAssignIDs(local *Cluster, existing *Cluster) error {
 		local.members[m.ID] = m
 	}
 	return nil
-}
-
-func isKeyNotFound(err error) bool {
-	e, ok := err.(*etcdErr.Error)
-	return ok && e.ErrorCode == etcdErr.EcodeKeyNotFound
 }

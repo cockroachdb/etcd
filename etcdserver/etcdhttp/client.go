@@ -102,7 +102,7 @@ func (h *keysHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
 	defer cancel()
 
-	rr, err := parseKeyRequest(r, etcdserver.GenID(), clockwork.NewRealClock())
+	rr, err := parseKeyRequest(r, clockwork.NewRealClock())
 	if err != nil {
 		writeError(w, err)
 		return
@@ -159,14 +159,26 @@ func (h *membersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		if trimPrefix(r.URL.Path, membersPrefix) != "" {
+		switch trimPrefix(r.URL.Path, membersPrefix) {
+		case "":
+			mc := newMemberCollection(h.clusterInfo.Members())
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(mc); err != nil {
+				log.Printf("etcdhttp: %v", err)
+			}
+		case "leader":
+			id := h.server.Leader()
+			if id == 0 {
+				writeError(w, httptypes.NewHTTPError(http.StatusServiceUnavailable, "During election"))
+				return
+			}
+			m := newMember(h.clusterInfo.Member(id))
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(m); err != nil {
+				log.Printf("etcdhttp: %v", err)
+			}
+		default:
 			writeError(w, httptypes.NewHTTPError(http.StatusNotFound, "Not found"))
-			return
-		}
-		mc := newMemberCollection(h.clusterInfo.Members())
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(mc); err != nil {
-			log.Printf("etcdhttp: %v", err)
 		}
 	case "POST":
 		req := httptypes.MemberCreateRequest{}
@@ -279,7 +291,7 @@ func serveVersion(w http.ResponseWriter, r *http.Request) {
 // parseKeyRequest converts a received http.Request on keysPrefix to
 // a server Request, performing validation of supplied fields as appropriate.
 // If any validation fails, an empty Request and non-nil error is returned.
-func parseKeyRequest(r *http.Request, id uint64, clock clockwork.Clock) (etcdserverpb.Request, error) {
+func parseKeyRequest(r *http.Request, clock clockwork.Clock) (etcdserverpb.Request, error) {
 	emptyReq := etcdserverpb.Request{}
 
 	err := r.ParseForm()
@@ -394,7 +406,6 @@ func parseKeyRequest(r *http.Request, id uint64, clock clockwork.Clock) (etcdser
 	}
 
 	rr := etcdserverpb.Request{
-		ID:        id,
 		Method:    r.Method,
 		Path:      p,
 		Val:       r.FormValue("value"),
