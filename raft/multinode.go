@@ -140,7 +140,6 @@ func (mn *multiNode) run() {
 		select {
 		case gc := <-mn.groupc:
 			r := newRaft(mn.id, nil, mn.election, mn.heartbeat, gc.storage)
-			r.becomeFollower(1, None)
 			group = &groupState{
 				id:         gc.id,
 				raft:       r,
