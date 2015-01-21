@@ -22,6 +22,14 @@ To start etcd automatically using custom settings at startup in Linux, using a [
 + Number of committed transactions to trigger a snapshot to disk.
 + default: "10000"
 
+##### heartbeat-interval 
++ Time (in milliseconds) of a heartbeat interval.
++ default: "100"
+
+##### election-timeout 
++ Time (in milliseconds) for an election to timeout.
++ default: "1000"
+
 ##### -listen-peer-urls
 + List of URLs to listen on for peer traffic.
 + default: "http://localhost:2380,http://localhost:7001"
@@ -137,9 +145,9 @@ Be CAUTIOUS to use unsafe flags because it will break the guarantee given by con
 + Print the version and exit.
 + default: false
 
-[build-cluster]: https://github.com/coreos/etcd/blob/master/Documentation/2.0/clustering.md#static
-[reconfig]: https://github.com/coreos/etcd/blob/master/Documentation/2.0/runtime-configuration.md
-[discovery]: https://github.com/coreos/etcd/blob/master/Documentation/2.0/clustering.md#discovery
-[proxy]: https://github.com/coreos/etcd/blob/master/Documentation/2.0/proxy.md
+[build-cluster]: https://github.com/coreos/etcd/blob/master/Documentation/clustering.md#static
+[reconfig]: https://github.com/coreos/etcd/blob/master/Documentation/runtime-configuration.md
+[discovery]: https://github.com/coreos/etcd/blob/master/Documentation/clustering.md#discovery
+[proxy]: https://github.com/coreos/etcd/blob/master/Documentation/proxy.md
 [security]: https://github.com/coreos/etcd/blob/master/Documentation/security.md
-[restore]: https://github.com/coreos/etcd/blob/master/Documentation/2.0/admin_guide.md#restoring-a-backup
+[restore]: https://github.com/coreos/etcd/blob/master/Documentation/admin_guide.md#restoring-a-backup

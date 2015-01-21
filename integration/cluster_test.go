@@ -144,7 +144,7 @@ func TestForceNewCluster(t *testing.T) {
 	cancel()
 	// ensure create has been applied in this machine
 	ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
-	if _, err := kapi.Watch("foo", resp.Node.ModifiedIndex).Next(ctx); err != nil {
+	if _, err := kapi.Watch("/foo", resp.Node.ModifiedIndex).Next(ctx); err != nil {
 		t.Fatalf("unexpected watch error: %v", err)
 	}
 	cancel()
@@ -158,14 +158,17 @@ func TestForceNewCluster(t *testing.T) {
 		t.Fatalf("unexpected ForceRestart error: %v", err)
 	}
 	defer c.Members[0].Terminate(t)
+	c.waitLeader(t, c.Members[:1])
 
-	// ensure force restart keep the old data, and new cluster can make progress
+	// use new http client to init new connection
 	cc = mustNewHTTPClient(t, []string{c.Members[0].URL()})
 	kapi = client.NewKeysAPI(cc)
-	_, err = kapi.Get(context.TODO(), "/foo")
-	if err != nil {
-		t.Errorf("unexpected get error: %v", err)
+	// ensure force restart keep the old data, and new cluster can make progress
+	ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
+	if _, err := kapi.Watch("/foo", resp.Node.ModifiedIndex).Next(ctx); err != nil {
+		t.Fatalf("unexpected watch error: %v", err)
 	}
+	cancel()
 	clusterMustProgress(t, c.Members[:1])
 }
 
@@ -480,7 +483,8 @@ func mustNewMember(t *testing.T, name string) *member {
 	}
 	m.NewCluster = true
 	m.Transport = mustNewTransport(t)
-	m.ElectionTimeoutTicks = electionTicks
+	m.ElectionTicks = electionTicks
+	m.TickMs = uint(tickDuration / time.Millisecond)
 	return m
 }
 
@@ -510,7 +514,7 @@ func (m *member) Clone(t *testing.T) *member {
 		panic(err)
 	}
 	mm.Transport = mustNewTransport(t)
-	mm.ElectionTimeoutTicks = m.ElectionTimeoutTicks
+	mm.ElectionTicks = m.ElectionTicks
 	return mm
 }
 
@@ -521,7 +525,6 @@ func (m *member) Launch() error {
 	if m.s, err = etcdserver.NewServer(&m.ServerConfig); err != nil {
 		return fmt.Errorf("failed to initialize the etcd server: %v", err)
 	}
-	m.s.Ticker = time.Tick(tickDuration)
 	m.s.SyncTicker = time.Tick(500 * time.Millisecond)
 	m.s.Start()
 
