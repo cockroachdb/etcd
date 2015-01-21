@@ -157,9 +157,6 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage
 		}
 		peers = state.ConfState.Nodes
 	}
-	if state.AppliedIndex != 0 {
-		raftlog.appliedTo(state.AppliedIndex)
-	}
 	r := &raft{
 		id:               id,
 		lead:             None,
@@ -174,6 +171,9 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage
 	}
 	if !isHardStateEqual(state.HardState, emptyState) {
 		r.loadState(state.HardState)
+	}
+	if state.AppliedIndex != 0 {
+		raftlog.appliedTo(state.AppliedIndex)
 	}
 	r.becomeFollower(r.Term, None)
 
