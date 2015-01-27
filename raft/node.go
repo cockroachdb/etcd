@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package raft
 
@@ -135,7 +133,7 @@ type Peer struct {
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage) Node {
 	n := newNode()
-	r := newRaft(id, nil, election, heartbeat, storage)
+	r := newRaft(id, nil, election, heartbeat, storage, 0)
 
 	// become the follower at term 1 and apply initial configuration
 	// entires of term 1
@@ -171,11 +169,13 @@ func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage
 	return &n
 }
 
-// RestartNode is identical to StartNode but does not take a list of peers.
+// RestartNode is similar to StartNode but does not take a list of peers.
 // The current membership of the cluster will be restored from the Storage.
-func RestartNode(id uint64, election, heartbeat int, storage Storage) Node {
+// If the caller has an existing state machine, pass in the last log index that
+// has been applied to it; otherwise use zero.
+func RestartNode(id uint64, election, heartbeat int, storage Storage, applied uint64) Node {
 	n := newNode()
-	r := newRaft(id, nil, election, heartbeat, storage)
+	r := newRaft(id, nil, election, heartbeat, storage, applied)
 
 	go n.run(r)
 	return &n

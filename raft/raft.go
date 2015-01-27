@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package raft
 
@@ -139,7 +137,8 @@ type raft struct {
 	step             stepFunc
 }
 
-func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage) *raft {
+func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage,
+	applied uint64) *raft {
 	if id == None {
 		panic("cannot use none id")
 	}
@@ -175,6 +174,9 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage
 	if state.AppliedIndex != 0 {
 		raftlog.appliedTo(state.AppliedIndex)
 	}
+	if applied > 0 {
+		raftlog.appliedTo(applied)
+	}
 	r.becomeFollower(r.Term, None)
 
 	nodesStrs := make([]string, 0)
@@ -182,8 +184,8 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage
 		nodesStrs = append(nodesStrs, fmt.Sprintf("%x", n))
 	}
 
-	log.Printf("raft: newRaft %x [peers: [%s], term: %d, commit: %d, lastindex: %d, lastterm: %d]",
-		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.lastIndex(), r.raftLog.lastTerm())
+	log.Printf("raft: newRaft %x [peers: [%s], term: %d, commit: %d, applied: %d, lastindex: %d, lastterm: %d]",
+		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.applied, r.raftLog.lastIndex(), r.raftLog.lastTerm())
 	return r
 }
 

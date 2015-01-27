@@ -1,3 +1,17 @@
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package migrate
 
 import (
@@ -14,6 +28,9 @@ import (
 	"github.com/coreos/etcd/wal"
 	"github.com/coreos/etcd/wal/walpb"
 )
+
+// We need an offset in leader election terms, because term 0 is special in 2.0.
+const termOffset4to2 = 1
 
 func snapDir4(dataDir string) string {
 	return path.Join(dataDir, "snapshot")
@@ -97,6 +114,10 @@ func Migrate4To2(dataDir string, name string) error {
 
 	ents2Len := len(ents2)
 	log.Printf("Found %d log entries: firstIndex=%d lastIndex=%d", ents2Len, ents2[0].Index, ents2[ents2Len-1].Index)
+
+	// set the state term to the biggest term we have ever seen,
+	// so term of future entries will not be the same with term of old ones.
+	st2.Term = ents2[ents2Len-1].Term
 
 	// explicitly prepend an empty entry as the WAL code expects it
 	ents2 = append(make([]raftpb.Entry, 1), ents2...)

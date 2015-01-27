@@ -1,23 +1,22 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package etcdserver
 
 import (
 	"encoding/json"
+	"expvar"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -35,6 +34,7 @@ import (
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/coreos/etcd/pkg/idutil"
+	"github.com/coreos/etcd/pkg/metrics"
 	"github.com/coreos/etcd/pkg/pbutil"
 	"github.com/coreos/etcd/pkg/timeutil"
 	"github.com/coreos/etcd/pkg/types"
@@ -159,7 +159,7 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 	switch {
 	case !haveWAL && !cfg.NewCluster:
 		us := getOtherPeerURLs(cfg.Cluster, cfg.Name)
-		existingCluster, err := GetClusterFromPeers(us)
+		existingCluster, err := GetClusterFromPeers(us, cfg.Transport)
 		if err != nil {
 			return nil, fmt.Errorf("cannot fetch cluster info from peer urls: %v", err)
 		}
@@ -175,7 +175,7 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 			return nil, err
 		}
 		m := cfg.Cluster.MemberByName(cfg.Name)
-		if isBootstrapped(cfg.Cluster, cfg.Name) {
+		if isBootstrapped(cfg) {
 			return nil, fmt.Errorf("member %s has already been bootstrapped", m.ID)
 		}
 		if cfg.ShouldDiscover() {
@@ -268,6 +268,7 @@ func (s *EtcdServer) Start() {
 	s.start()
 	go s.publish(defaultPublishRetryInterval)
 	go s.purgeFile()
+	metrics.Publish("raft.status", expvar.Func(s.raftStatus))
 }
 
 // start prepares and starts server in a new goroutine. It is no longer safe to
@@ -514,6 +515,8 @@ func (s *EtcdServer) LeaderStats() []byte {
 }
 
 func (s *EtcdServer) StoreStats() []byte { return s.store.JsonStats() }
+
+func (s *EtcdServer) raftStatus() interface{} { return s.r.Status() }
 
 func (s *EtcdServer) AddMember(ctx context.Context, memb Member) error {
 	// TODO: move Member to protobuf type
@@ -820,9 +823,12 @@ func (s *EtcdServer) ResumeSending() { s.r.resumeSending() }
 
 // isBootstrapped tries to check if the given member has been bootstrapped
 // in the given cluster.
-func isBootstrapped(cl *Cluster, member string) bool {
+func isBootstrapped(cfg *ServerConfig) bool {
+	cl := cfg.Cluster
+	member := cfg.Name
+
 	us := getOtherPeerURLs(cl, member)
-	rcl, err := getClusterFromPeers(us, false)
+	rcl, err := getClusterFromPeers(us, false, cfg.Transport)
 	if err != nil {
 		return false
 	}
@@ -842,17 +848,15 @@ func isBootstrapped(cl *Cluster, member string) bool {
 // these URLs. The first URL to provide a response is used. If no URLs provide
 // a response, or a Cluster cannot be successfully created from a received
 // response, an error is returned.
-func GetClusterFromPeers(urls []string) (*Cluster, error) {
-	return getClusterFromPeers(urls, true)
+func GetClusterFromPeers(urls []string, tr *http.Transport) (*Cluster, error) {
+	return getClusterFromPeers(urls, true, tr)
 }
 
 // If logerr is true, it prints out more error messages.
-func getClusterFromPeers(urls []string, logerr bool) (*Cluster, error) {
+func getClusterFromPeers(urls []string, logerr bool, tr *http.Transport) (*Cluster, error) {
 	cc := &http.Client{
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: 500 * time.Millisecond,
-		},
-		Timeout: time.Second,
+		Transport: tr,
+		Timeout:   time.Second,
 	}
 	for _, u := range urls {
 		resp, err := cc.Get(u + "/members")

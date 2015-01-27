@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package etcdserver
 
@@ -21,9 +19,9 @@ import (
 	"log"
 	"net/http"
 	"path"
-	"reflect"
 	"sort"
 
+	"github.com/coreos/etcd/pkg/netutil"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft"
 )
@@ -76,9 +74,10 @@ func (c *ServerConfig) VerifyBootstrapConfig() error {
 	}
 
 	// Advertised peer URLs must match those in the cluster peer list
+	// TODO: Remove URLStringsEqual after improvement of using hostnames #2150 #2123
 	apurls := c.PeerURLs.StringSlice()
 	sort.Strings(apurls)
-	if !reflect.DeepEqual(apurls, m.PeerURLs) {
+	if !netutil.URLStringsEqual(apurls, m.PeerURLs) {
 		return fmt.Errorf("%s has different advertised URLs in the cluster and advertised peer URLs list", c.Name)
 	}
 	return nil

@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package rafthttp
 
@@ -160,7 +158,7 @@ type streamWriter struct {
 	done chan struct{}
 }
 
-// newStreamServer starts and returns a new started stream server.
+// newStreamWriter starts and returns a new unstarted stream writer.
 // The caller should call stop when finished, to shut it down.
 func newStreamWriter(to types.ID, term uint64) *streamWriter {
 	s := &streamWriter{
@@ -193,7 +191,8 @@ func (s *streamWriter) handle(w WriteFlusher) {
 		log.Printf("rafthttp: server streaming to %s at term %d has been stopped", s.to, s.term)
 	}()
 
-	ew := &entryWriter{w: w}
+	ew := newEntryWriter(w, s.to)
+	defer ew.stop()
 	for ents := range s.q {
 		start := time.Now()
 		if err := ew.writeEntries(ents); err != nil {
@@ -280,7 +279,8 @@ func (s *streamReader) handle(r io.Reader) {
 		log.Printf("rafthttp: client streaming to %s at term %d has been stopped", s.to, s.term)
 	}()
 
-	er := &entryReader{r: r}
+	er := newEntryReader(r, s.to)
+	defer er.stop()
 	for {
 		ents, err := er.readEntries()
 		if err != nil {

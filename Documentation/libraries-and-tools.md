@@ -15,11 +15,10 @@
 
 **Java libraries**
 
-
 - [boonproject/etcd](https://github.com/boonproject/boon/blob/master/etcd/README.md) - Supports v2, Async/Sync and waits
 - [justinsb/jetcd](https://github.com/justinsb/jetcd)
 - [diwakergupta/jetcd](https://github.com/diwakergupta/jetcd) - Supports v2
-- [jurmous/etcd4j](https://github.com/jurmous/etcd4j) - Supports v2
+- [jurmous/etcd4j](https://github.com/jurmous/etcd4j) - Supports v2, Async/Sync, waits and SSL
 - [AdoHe/etcd4j](http://github.com/AdoHe/etcd4j) - Supports v2 (enhance for real production cluster)
 
 **Python libraries**
@@ -68,6 +67,10 @@
 **Haskell libraries**
 
 - [wereHamster/etcd-hs](https://github.com/wereHamster/etcd-hs)
+ 
+**Tcl libraries**
+
+- [efrecon/etcd-tcl](https://github.com/efrecon/etcd-tcl) - Supports v2, except wait.
 
 A detailed recap of client functionalities can be found in the [clients compatibility matrix][clients-matrix.md].
 

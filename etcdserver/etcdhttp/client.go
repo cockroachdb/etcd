@@ -1,24 +1,23 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package etcdhttp
 
 import (
 	"encoding/json"
 	"errors"
+	"expvar"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -36,6 +35,7 @@ import (
 	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/coreos/etcd/etcdserver/stats"
+	"github.com/coreos/etcd/pkg/metrics"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/store"
@@ -47,6 +47,7 @@ const (
 	deprecatedMachinesPrefix = "/v2/machines"
 	membersPrefix            = "/v2/members"
 	statsPrefix              = "/v2/stats"
+	statsPath                = "/stats"
 	healthPath               = "/health"
 	versionPath              = "/version"
 )
@@ -83,6 +84,7 @@ func NewClientHandler(server *etcdserver.EtcdServer) http.Handler {
 	mux.HandleFunc(statsPrefix+"/store", sh.serveStore)
 	mux.HandleFunc(statsPrefix+"/self", sh.serveSelf)
 	mux.HandleFunc(statsPrefix+"/leader", sh.serveLeader)
+	mux.HandleFunc(statsPath, serveStats)
 	mux.Handle(membersPrefix, mh)
 	mux.Handle(membersPrefix+"/", mh)
 	mux.Handle(deprecatedMachinesPrefix, dmh)
@@ -284,6 +286,21 @@ func (h *statsHandler) serveLeader(w http.ResponseWriter, r *http.Request) {
 	w.Write(stats)
 }
 
+func serveStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// TODO: getting one key or a prefix of keys based on path
+	fmt.Fprintf(w, "{\n")
+	first := true
+	metrics.Do(func(kv expvar.KeyValue) {
+		if !first {
+			fmt.Fprintf(w, ",\n")
+		}
+		first = false
+		fmt.Fprintf(w, "%q: %s", kv.Key, kv.Value)
+	})
+	fmt.Fprintf(w, "\n}\n")
+}
+
 // TODO: change etcdserver to raft interface when we have it.
 //       add test for healthHeadler when we have the interface ready.
 func healthHandler(server *etcdserver.EtcdServer) http.HandlerFunc {
@@ -317,7 +334,7 @@ func serveVersion(w http.ResponseWriter, r *http.Request) {
 	if !allowMethod(w, r.Method, "GET") {
 		return
 	}
-	w.Write([]byte("etcd " + version.Version))
+	fmt.Fprintf(w, `{"releaseVersion":"%s","internalVersion":"%s"}`, version.Version, version.InternalVersion)
 }
 
 // parseKeyRequest converts a received http.Request on keysPrefix to
