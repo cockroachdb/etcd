@@ -139,7 +139,8 @@ func (mn *multiNode) run() {
 		var group *groupState
 		select {
 		case gc := <-mn.groupc:
-			r := newRaft(mn.id, nil, mn.election, mn.heartbeat, gc.storage)
+			// TODO(bdarnell): pass applied through gc and into newRaft.
+			r := newRaft(mn.id, nil, mn.election, mn.heartbeat, gc.storage, 0)
 			group = &groupState{
 				id:         gc.id,
 				raft:       r,
