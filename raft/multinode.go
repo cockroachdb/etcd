@@ -109,6 +109,7 @@ func (g *groupState) commitReady(rd Ready) {
 	}
 	if !IsEmptySnap(rd.Snapshot) {
 		g.prevSnapi = rd.Snapshot.Metadata.Index
+		g.raft.raftLog.stableSnapTo(g.prevSnapi)
 	}
 	if len(rd.Entries) > 0 {
 		// TODO(bdarnell): stableTo(rd.Snapshot.Index) if any
