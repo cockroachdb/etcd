@@ -36,7 +36,7 @@ This can protect you from cluster corruption in case of mis-configuration becaus
 
 #### Optimal Cluster Size
 
-The recommended etcd cluster size is 3, 5 or 7, which is decided by the fault tolerance requirement. A 7-member cluster can provide enough fault tolerance in most cases. While larger cluster provides better fault tolerance, its write performance becomes lower since data needs to be replicated to more machines.
+The recommended etcd cluster size is 3, 5 or 7, which is decided by the fault tolerance requirement. A 7-member cluster can provide enough fault tolerance in most cases. While larger cluster provides better fault tolerance the write performance reduces since data needs to be replicated to more machines.
 
 #### Fault Tolerance Table
 
@@ -54,6 +54,10 @@ It is recommended to have an odd number of members in a cluster. Having an odd c
 | 9 | 5 | **4** |
 
 As you can see, adding another member to bring the size of cluster up to an odd size is always worth it. During a network partition, an odd number of members also guarantees that there will almost always be a majority of the cluster that can continue to operate and be the source of truth when the partition ends.
+
+#### Changing Cluster Size
+
+After your cluster is up and running, adding or removing members is done via [runtime reconfiguration](runtime-configuration.md), which allows the cluster to be modified without downtime. The `etcdctl` tool has a `member list`, `member add` and `member remove` commands to complete this process.
 
 ### Member Migration
 
