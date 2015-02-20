@@ -12,9 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package version
+// +build windows
 
-var (
-	Version         = "2.0.3"
-	InternalVersion = "2"
-)
+package osutil
+
+import "os"
+
+type InterruptHandler func()
+
+// RegisterInterruptHandler is a no-op on windows
+func RegisterInterruptHandler(h InterruptHandler) {}
+
+// HandleInterrupts is a no-op on windows
+func HandleInterrupts() {}
+
+// Exit calls os.Exit
+func Exit(code int) {
+	os.Exit(code)
+}

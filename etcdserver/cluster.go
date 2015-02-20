@@ -56,14 +56,15 @@ type ClusterInfo interface {
 
 // Cluster is a list of Members that belong to the same raft cluster
 type Cluster struct {
-	id      types.ID
-	token   string
-	members map[types.ID]*Member
+	id    types.ID
+	token string
+	store store.Store
+
+	sync.Mutex // guards members and removed map
+	members    map[types.ID]*Member
 	// removed contains the ids of removed members in the cluster.
 	// removed id cannot be reused.
 	removed map[types.ID]bool
-	store   store.Store
-	sync.Mutex
 }
 
 // NewClusterFromString returns a Cluster instantiated from the given cluster token
@@ -344,6 +345,20 @@ func (c *Cluster) UpdateRaftAttributes(id types.ID, raftAttr RaftAttributes) {
 		log.Panicf("update raftAttributes should never fail: %v", err)
 	}
 	c.members[id].RaftAttributes = raftAttr
+}
+
+// Validate ensures that there is no identical urls in the cluster peer list
+func (c *Cluster) Validate() error {
+	urlMap := make(map[string]bool)
+	for _, m := range c.Members() {
+		for _, url := range m.PeerURLs {
+			if urlMap[url] {
+				return fmt.Errorf("duplicate url %v in cluster config", url)
+			}
+			urlMap[url] = true
+		}
+	}
+	return nil
 }
 
 func membersFromStore(st store.Store) (map[types.ID]*Member, map[types.ID]bool) {

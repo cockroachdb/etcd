@@ -103,7 +103,7 @@ func Migrate4To2(dataDir string, name string) error {
 	st2 := cfg4.HardState2()
 
 	// If we've got the most recent snapshot, we can use it's committed index. Still likely less than the current actual index, but worth it for the replay.
-	if snap2 != nil {
+	if snap2 != nil && st2.Commit < snap2.Metadata.Index {
 		st2.Commit = snap2.Metadata.Index
 	}
 
@@ -175,8 +175,8 @@ func GuessNodeID(nodes map[string]uint64, snap4 *Snapshot4, cfg *Config4, name s
 			delete(snapNodes, p.Name)
 		}
 		if len(snapNodes) == 1 {
-			for name, id := range nodes {
-				log.Printf("Autodetected from snapshot: name %s", name)
+			for nodename, id := range nodes {
+				log.Printf("Autodetected from snapshot: name %s", nodename)
 				return id
 			}
 		}
@@ -186,8 +186,8 @@ func GuessNodeID(nodes map[string]uint64, snap4 *Snapshot4, cfg *Config4, name s
 		delete(nodes, p.Name)
 	}
 	if len(nodes) == 1 {
-		for name, id := range nodes {
-			log.Printf("Autodetected name %s", name)
+		for nodename, id := range nodes {
+			log.Printf("Autodetected name %s", nodename)
 			return id
 		}
 	}

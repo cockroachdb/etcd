@@ -186,13 +186,13 @@ func clusterMustProgress(t *testing.T, membs []*member) {
 
 	for i, m := range membs {
 		u := m.URL()
-		cc := mustNewHTTPClient(t, []string{u})
-		kapi := client.NewKeysAPI(cc)
-		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-		if _, err := kapi.Watch(key, resp.Node.ModifiedIndex).Next(ctx); err != nil {
+		mcc := mustNewHTTPClient(t, []string{u})
+		mkapi := client.NewKeysAPI(mcc)
+		mctx, mcancel := context.WithTimeout(context.Background(), requestTimeout)
+		if _, err := mkapi.Watch(key, resp.Node.ModifiedIndex).Next(mctx); err != nil {
 			t.Fatalf("#%d: watch on %s error: %v", i, u, err)
 		}
-		cancel()
+		mcancel()
 	}
 }
 
@@ -545,6 +545,24 @@ func (m *member) Launch() error {
 		m.hss = append(m.hss, hs)
 	}
 	return nil
+}
+
+func (m *member) WaitOK(t *testing.T) {
+	cc := mustNewHTTPClient(t, []string{m.URL()})
+	kapi := client.NewKeysAPI(cc)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		_, err := kapi.Get(ctx, "/")
+		if err != nil {
+			time.Sleep(tickDuration)
+			continue
+		}
+		cancel()
+		break
+	}
+	for m.s.Leader() == 0 {
+		time.Sleep(tickDuration)
+	}
 }
 
 func (m *member) URL() string { return m.ClientURLs[0].String() }

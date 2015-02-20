@@ -34,6 +34,7 @@ import (
 	"github.com/coreos/etcd/pkg/flags"
 	"github.com/coreos/etcd/pkg/osutil"
 	"github.com/coreos/etcd/pkg/types"
+	etcdversion "github.com/coreos/etcd/version"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 )
@@ -69,6 +70,10 @@ func StartDesiredVersion(args []string) {
 	if err != nil {
 		return
 	}
+	if fs.Lookup("version").Value.String() == "true" {
+		fmt.Println("etcd version", etcdversion.Version)
+		os.Exit(0)
+	}
 
 	ver := checkInternalVersion(fs)
 	log.Printf("starter: start etcd version %s", ver)
@@ -101,12 +106,12 @@ func checkInternalVersion(fs *flag.FlagSet) version {
 		log.Fatalf("starter: please set --data-dir or ETCD_DATA_DIR for etcd")
 	}
 	// check the data directory
-	ver, err := checkVersion(dataDir)
+	dataver, err := checkVersion(dataDir)
 	if err != nil {
 		log.Fatalf("starter: failed to detect etcd version in %v: %v", dataDir, err)
 	}
-	log.Printf("starter: detect etcd version %s in %s", ver, dataDir)
-	switch ver {
+	log.Printf("starter: detect etcd version %s in %s", dataver, dataDir)
+	switch dataver {
 	case v2_0:
 		return internalV2
 	case v2_0Proxy:
@@ -348,7 +353,8 @@ func newDefaultClient(tls *TLSInfo) (*http.Client, error) {
 }
 
 type value struct {
-	s string
+	isBoolFlag bool
+	s          string
 }
 
 func (v *value) String() string { return v.s }
@@ -358,12 +364,20 @@ func (v *value) Set(s string) error {
 	return nil
 }
 
+func (v *value) IsBoolFlag() bool { return v.isBoolFlag }
+
+type boolFlag interface {
+	flag.Value
+	IsBoolFlag() bool
+}
+
 // parseConfig parses out the input config from cmdline arguments and
 // environment variables.
 func parseConfig(args []string) (*flag.FlagSet, error) {
 	fs := flag.NewFlagSet("full flagset", flag.ContinueOnError)
 	etcdmain.NewConfig().VisitAll(func(f *flag.Flag) {
-		fs.Var(&value{}, f.Name, "")
+		_, isBoolFlag := f.Value.(boolFlag)
+		fs.Var(&value{isBoolFlag: isBoolFlag}, f.Name, "")
 	})
 	if err := fs.Parse(args); err != nil {
 		return nil, err

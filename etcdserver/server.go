@@ -18,13 +18,11 @@ import (
 	"encoding/json"
 	"expvar"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
 	"path"
 	"regexp"
-	"sort"
 	"sync/atomic"
 	"time"
 
@@ -146,6 +144,7 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 	var n raft.Node
 	var s *raft.MemoryStorage
 	var id types.ID
+
 	walVersion, err := wal.DetectVersion(cfg.DataDir)
 	if err != nil {
 		return nil, err
@@ -154,12 +153,11 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		return nil, fmt.Errorf("unknown wal version in data dir %s", cfg.DataDir)
 	}
 	haveWAL := walVersion != wal.WALNotExist
-
 	ss := snap.New(cfg.SnapDir())
+
 	switch {
 	case !haveWAL && !cfg.NewCluster:
-		us := getOtherPeerURLs(cfg.Cluster, cfg.Name)
-		existingCluster, err := GetClusterFromPeers(us, cfg.Transport)
+		existingCluster, err := GetClusterFromRemotePeers(getRemotePeerURLs(cfg.Cluster, cfg.Name), cfg.Transport)
 		if err != nil {
 			return nil, fmt.Errorf("cannot fetch cluster info from peer urls: %v", err)
 		}
@@ -175,26 +173,36 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 			return nil, err
 		}
 		m := cfg.Cluster.MemberByName(cfg.Name)
-		if isBootstrapped(cfg) {
+		if isMemberBootstrapped(cfg.Cluster, cfg.Name, cfg.Transport) {
 			return nil, fmt.Errorf("member %s has already been bootstrapped", m.ID)
 		}
 		if cfg.ShouldDiscover() {
-			s, err := discovery.JoinCluster(cfg.DiscoveryURL, cfg.DiscoveryProxy, m.ID, cfg.Cluster.String())
+			str, err := discovery.JoinCluster(cfg.DiscoveryURL, cfg.DiscoveryProxy, m.ID, cfg.Cluster.String())
 			if err != nil {
 				return nil, err
 			}
-			if cfg.Cluster, err = NewClusterFromString(cfg.Cluster.token, s); err != nil {
+			if cfg.Cluster, err = NewClusterFromString(cfg.Cluster.token, str); err != nil {
 				return nil, err
+			}
+			if err := cfg.Cluster.Validate(); err != nil {
+				return nil, fmt.Errorf("bad discovery cluster: %v", err)
 			}
 		}
 		cfg.Cluster.SetStore(st)
 		cfg.PrintWithInitial()
 		id, n, s, w = startNode(cfg, cfg.Cluster.MemberIDs())
 	case haveWAL:
-		if walVersion != wal.WALv0_5 {
-			if err := upgradeWAL(cfg, walVersion); err != nil {
-				return nil, err
-			}
+		// Run the migrations.
+		if err := upgradeWAL(cfg.DataDir, cfg.Name, walVersion); err != nil {
+			return nil, err
+		}
+
+		if err := fileutil.IsDirWriteable(cfg.DataDir); err != nil {
+			return nil, fmt.Errorf("cannot write to data directory: %v", err)
+		}
+
+		if err := fileutil.IsDirWriteable(cfg.MemberDir()); err != nil {
+			return nil, fmt.Errorf("cannot write to member directory: %v", err)
 		}
 
 		if cfg.ShouldDiscover() {
@@ -386,7 +394,18 @@ func (s *EtcdServer) run() {
 					log.Panicf("recovery store error: %v", err)
 				}
 				s.Cluster.Recover()
+
+				// recover raft transport
+				s.r.transport.RemoveAllPeers()
+				for _, m := range s.Cluster.Members() {
+					if m.ID == s.ID() {
+						continue
+					}
+					s.r.transport.AddPeer(m.ID, m.PeerURLs)
+				}
+
 				appliedi = rd.Snapshot.Metadata.Index
+				confState = rd.Snapshot.Metadata.ConfState
 				log.Printf("etcdserver: recovered from incoming snapshot at index %d", snapi)
 			}
 			// TODO(bmizerany): do this in the background, but take
@@ -820,88 +839,3 @@ func (s *EtcdServer) snapshot(snapi uint64, confState *raftpb.ConfState) {
 func (s *EtcdServer) PauseSending() { s.r.pauseSending() }
 
 func (s *EtcdServer) ResumeSending() { s.r.resumeSending() }
-
-// isBootstrapped tries to check if the given member has been bootstrapped
-// in the given cluster.
-func isBootstrapped(cfg *ServerConfig) bool {
-	cl := cfg.Cluster
-	member := cfg.Name
-
-	us := getOtherPeerURLs(cl, member)
-	rcl, err := getClusterFromPeers(us, false, cfg.Transport)
-	if err != nil {
-		return false
-	}
-	id := cl.MemberByName(member).ID
-	m := rcl.Member(id)
-	if m == nil {
-		return false
-	}
-	if len(m.ClientURLs) > 0 {
-		return true
-	}
-	return false
-}
-
-// GetClusterFromPeers takes a set of URLs representing etcd peers, and
-// attempts to construct a Cluster by accessing the members endpoint on one of
-// these URLs. The first URL to provide a response is used. If no URLs provide
-// a response, or a Cluster cannot be successfully created from a received
-// response, an error is returned.
-func GetClusterFromPeers(urls []string, tr *http.Transport) (*Cluster, error) {
-	return getClusterFromPeers(urls, true, tr)
-}
-
-// If logerr is true, it prints out more error messages.
-func getClusterFromPeers(urls []string, logerr bool, tr *http.Transport) (*Cluster, error) {
-	cc := &http.Client{
-		Transport: tr,
-		Timeout:   time.Second,
-	}
-	for _, u := range urls {
-		resp, err := cc.Get(u + "/members")
-		if err != nil {
-			if logerr {
-				log.Printf("etcdserver: could not get cluster response from %s: %v", u, err)
-			}
-			continue
-		}
-		b, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			if logerr {
-				log.Printf("etcdserver: could not read the body of cluster response: %v", err)
-			}
-			continue
-		}
-		var membs []*Member
-		if err := json.Unmarshal(b, &membs); err != nil {
-			if logerr {
-				log.Printf("etcdserver: could not unmarshal cluster response: %v", err)
-			}
-			continue
-		}
-		id, err := types.IDFromString(resp.Header.Get("X-Etcd-Cluster-ID"))
-		if err != nil {
-			if logerr {
-				log.Printf("etcdserver: could not parse the cluster ID from cluster res: %v", err)
-			}
-			continue
-		}
-		return NewClusterFromMembers("", id, membs), nil
-	}
-	return nil, fmt.Errorf("etcdserver: could not retrieve cluster information from the given urls")
-}
-
-// getOtherPeerURLs returns peer urls of other members in the cluster. The
-// returned list is sorted in ascending lexicographical order.
-func getOtherPeerURLs(cl ClusterInfo, self string) []string {
-	us := make([]string, 0)
-	for _, m := range cl.Members() {
-		if m.Name == self {
-			continue
-		}
-		us = append(us, m.PeerURLs...)
-	}
-	sort.Strings(us)
-	return us
-}

@@ -12,9 +12,9 @@ import (
 type node struct {
 	raft.Node
 	id     uint64
-	paused bool
 	iface  iface
 	stopc  chan struct{}
+	pausec chan bool
 
 	// stable
 	storage *raft.MemoryStorage
@@ -29,6 +29,7 @@ func startNode(id uint64, peers []raft.Peer, iface iface) *node {
 		id:      id,
 		storage: st,
 		iface:   iface,
+		pausec:  make(chan bool),
 	}
 	n.start()
 	return n
@@ -49,11 +50,10 @@ func (n *node) start() {
 					n.storage.SetHardState(n.state)
 				}
 				n.storage.Append(rd.Entries)
-				go func() {
-					for _, m := range rd.Messages {
-						n.iface.send(m)
-					}
-				}()
+				// TODO: make send async, more like real world...
+				for _, m := range rd.Messages {
+					n.iface.send(m)
+				}
 				n.Advance()
 			case m := <-n.iface.recv():
 				n.Step(context.TODO(), m)
@@ -63,6 +63,19 @@ func (n *node) start() {
 				n.Node = nil
 				close(n.stopc)
 				return
+			case p := <-n.pausec:
+				recvms := make([]raftpb.Message, 0)
+				for p {
+					select {
+					case m := <-n.iface.recv():
+						recvms = append(recvms, m)
+					case p = <-n.pausec:
+					}
+				}
+				// step all pending messages
+				for _, m := range recvms {
+					n.Step(context.TODO(), m)
+				}
 			}
 		}
 	}()
@@ -92,14 +105,10 @@ func (n *node) restart() {
 // The paused node buffers the received messages and replies
 // all of them when it resumes.
 func (n *node) pause() {
-	panic("unimplemented")
+	n.pausec <- true
 }
 
 // resume resumes the paused node.
 func (n *node) resume() {
-	panic("unimplemented")
-}
-
-func (n *node) isPaused() bool {
-	return n.paused
+	n.pausec <- false
 }

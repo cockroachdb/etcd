@@ -31,7 +31,7 @@ import (
 	"github.com/coreos/etcd/etcdserver"
 	"github.com/coreos/etcd/etcdserver/etcdhttp"
 	"github.com/coreos/etcd/pkg/cors"
-	"github.com/coreos/etcd/pkg/fileutil"
+	"github.com/coreos/etcd/pkg/osutil"
 	"github.com/coreos/etcd/pkg/transport"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/proxy"
@@ -74,7 +74,10 @@ func Main() {
 		}
 	}
 
+	osutil.HandleInterrupts()
+
 	<-stopped
+	osutil.Exit(0)
 }
 
 // startEtcd launches the etcd server and HTTP handlers for client/server communication.
@@ -87,13 +90,6 @@ func startEtcd(cfg *config) (<-chan struct{}, error) {
 	if cfg.dir == "" {
 		cfg.dir = fmt.Sprintf("%v.etcd", cfg.name)
 		log.Printf("no data-dir provided, using default data-dir ./%s", cfg.dir)
-	}
-	if err := makeMemberDir(cfg.dir); err != nil {
-		return nil, fmt.Errorf("cannot use /member sub-directory: %v", err)
-	}
-	membdir := path.Join(cfg.dir, "member")
-	if err := fileutil.IsDirWriteable(membdir); err != nil {
-		return nil, fmt.Errorf("cannot write to data directory: %v", err)
 	}
 
 	pt, err := transport.NewTimeoutTransport(cfg.peerTLSInfo, rafthttp.ConnReadTimeout, rafthttp.ConnWriteTimeout)
@@ -149,7 +145,7 @@ func startEtcd(cfg *config) (<-chan struct{}, error) {
 		Name:            cfg.name,
 		ClientURLs:      cfg.acurls,
 		PeerURLs:        cfg.apurls,
-		DataDir:         membdir,
+		DataDir:         cfg.dir,
 		SnapCount:       cfg.snapCount,
 		MaxSnapFiles:    cfg.maxSnapFiles,
 		MaxWALFiles:     cfg.maxWalFiles,
@@ -168,6 +164,7 @@ func startEtcd(cfg *config) (<-chan struct{}, error) {
 		return nil, err
 	}
 	s.Start()
+	osutil.RegisterInterruptHandler(s.Stop)
 
 	if cfg.corsInfo.String() != "" {
 		log.Printf("etcd: cors = %s", cfg.corsInfo)
@@ -252,7 +249,7 @@ func startProxy(cfg *config) error {
 	}
 
 	uf := func() []string {
-		gcls, err := etcdserver.GetClusterFromPeers(peerURLs, tr)
+		gcls, err := etcdserver.GetClusterFromRemotePeers(peerURLs, tr)
 		// TODO: remove the 2nd check when we fix GetClusterFromPeers
 		// GetClusterFromPeers should not return nil error with an invaild empty cluster
 		if err != nil {
@@ -334,42 +331,6 @@ func setupCluster(cfg *config) (*etcdserver.Cluster, error) {
 		cls, err = etcdserver.NewClusterFromString(cfg.initialClusterToken, cfg.initialCluster)
 	}
 	return cls, err
-}
-
-func makeMemberDir(dir string) error {
-	membdir := path.Join(dir, "member")
-	_, err := os.Stat(membdir)
-	switch {
-	case err == nil:
-		return nil
-	case !os.IsNotExist(err):
-		return err
-	}
-	if err := os.MkdirAll(membdir, 0700); err != nil {
-		return err
-	}
-	v1Files := types.NewUnsafeSet("conf", "log", "snapshot")
-	v2Files := types.NewUnsafeSet("wal", "snap")
-	names, err := fileutil.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		switch {
-		case v1Files.Contains(name):
-			// Link it to the subdir and keep the v1 file at the original
-			// location, so v0.4 etcd can still bootstrap if the upgrade
-			// failed.
-			if err := os.Symlink(path.Join(dir, name), path.Join(membdir, name)); err != nil {
-				return err
-			}
-		case v2Files.Contains(name):
-			if err := os.Rename(path.Join(dir, name), path.Join(membdir, name)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func genClusterString(name string, urls types.URLs) string {

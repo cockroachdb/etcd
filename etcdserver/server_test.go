@@ -1027,8 +1027,8 @@ func TestPublish(t *testing.T) {
 		t.Errorf("method = %s, want PUT", r.Method)
 	}
 	wm := Member{ID: 1, Attributes: Attributes{Name: "node1", ClientURLs: []string{"http://a", "http://b"}}}
-	if w := path.Join(memberStoreKey(wm.ID), attributesSuffix); r.Path != w {
-		t.Errorf("path = %s, want %s", r.Path, w)
+	if wpath := path.Join(memberStoreKey(wm.ID), attributesSuffix); r.Path != wpath {
+		t.Errorf("path = %s, want %s", r.Path, wpath)
 	}
 	var gattr Attributes
 	if err := json.Unmarshal([]byte(r.Val), &gattr); err != nil {
@@ -1072,8 +1072,8 @@ func TestPublishRetry(t *testing.T) {
 
 	action := n.Action()
 	// multiple Proposes
-	if n := len(action); n < 2 {
-		t.Errorf("len(action) = %d, want >= 2", n)
+	if cnt := len(action); cnt < 2 {
+		t.Errorf("len(action) = %d, want >= 2", cnt)
 	}
 }
 
@@ -1135,7 +1135,7 @@ func TestGetOtherPeerURLs(t *testing.T) {
 	}
 	for i, tt := range tests {
 		cl := NewClusterFromMembers("", types.ID(0), tt.membs)
-		urls := getOtherPeerURLs(cl, tt.self)
+		urls := getRemotePeerURLs(cl, tt.self)
 		if !reflect.DeepEqual(urls, tt.wurls) {
 			t.Errorf("#%d: urls = %+v, want %+v", i, urls, tt.wurls)
 		}
@@ -1393,6 +1393,7 @@ func (s *nopTransporter) Handler() http.Handler               { return nil }
 func (s *nopTransporter) Send(m []raftpb.Message)             {}
 func (s *nopTransporter) AddPeer(id types.ID, us []string)    {}
 func (s *nopTransporter) RemovePeer(id types.ID)              {}
+func (s *nopTransporter) RemoveAllPeers()                     {}
 func (s *nopTransporter) UpdatePeer(id types.ID, us []string) {}
 func (s *nopTransporter) Stop()                               {}
 func (s *nopTransporter) Pause()                              {}
