@@ -13,7 +13,7 @@ type MultiNode interface {
 	Campaign(ctx context.Context, group uint64) error
 	Propose(ctx context.Context, group uint64, data []byte) error
 	ProposeConfChange(ctx context.Context, group uint64, cc pb.ConfChange) error
-	ApplyConfChange(group uint64, cc pb.ConfChange)
+	ApplyConfChange(group uint64, cc pb.ConfChange) *pb.ConfState
 	Step(ctx context.Context, group uint64, msg pb.Message) error
 	Ready() <-chan map[uint64]Ready
 	// Advance() must be called with the last value returned from the Ready() channel.
@@ -38,6 +38,7 @@ type multiMessage struct {
 type multiConfChange struct {
 	group uint64
 	msg   pb.ConfChange
+	ch    chan pb.ConfState
 }
 
 type groupCreation struct {
@@ -187,19 +188,36 @@ func (mn *multiNode) run() {
 			mm.msg.From = mn.id
 			group = groups[mm.group]
 			group.raft.Step(mm.msg)
+
 		case mm := <-mn.recvc:
 			group = groups[mm.group]
 			group.raft.Step(mm.msg)
+
 		case mcc := <-mn.confc:
 			group = groups[mcc.group]
+			if mcc.msg.NodeID == None {
+				group.raft.resetPendingConf()
+				select {
+				case mcc.ch <- pb.ConfState{Nodes: group.raft.nodes()}:
+				case <-mn.done:
+				}
+				break
+			}
 			switch mcc.msg.Type {
 			case pb.ConfChangeAddNode:
 				group.raft.addNode(mcc.msg.NodeID)
 			case pb.ConfChangeRemoveNode:
 				group.raft.removeNode(mcc.msg.NodeID)
+			case pb.ConfChangeUpdateNode:
+				group.raft.resetPendingConf()
 			default:
 				panic("unexpected conf type")
 			}
+			select {
+			case mcc.ch <- pb.ConfState{Nodes: group.raft.nodes()}:
+			case <-mn.done:
+			}
+
 		case <-mn.tickc:
 			// TODO(bdarnell): instead of calling every group on every tick,
 			// we should have a priority queue of groups based on their next
@@ -211,6 +229,7 @@ func (mn *multiNode) run() {
 					rds[g.id] = rd
 				}
 			}
+
 		case readyc <- rds:
 			// Clear outgoing messages as soon as we've passed them to the application.
 			for g := range rds {
@@ -218,6 +237,7 @@ func (mn *multiNode) run() {
 			}
 			rds = map[uint64]Ready{}
 			advancec = mn.advancec
+
 		case advs := <-advancec:
 			for groupID, rd := range advs {
 				group, ok := groups[groupID]
@@ -235,6 +255,7 @@ func (mn *multiNode) run() {
 				}
 			}
 			advancec = nil
+
 		case <-mn.done:
 			return
 		}
@@ -336,10 +357,18 @@ func (mn *multiNode) step(ctx context.Context, m multiMessage) error {
 	}
 }
 
-func (mn *multiNode) ApplyConfChange(group uint64, cc pb.ConfChange) {
+func (mn *multiNode) ApplyConfChange(group uint64, cc pb.ConfChange) *pb.ConfState {
+	mcc := multiConfChange{group, cc, make(chan pb.ConfState)}
 	select {
-	case mn.confc <- multiConfChange{group, cc}:
+	case mn.confc <- mcc:
 	case <-mn.done:
+	}
+	select {
+	case cs := <-mcc.ch:
+		return &cs
+	case <-mn.done:
+		// Per comments on Node.ApplyConfChange, this method should never return nil.
+		return &pb.ConfState{}
 	}
 }
 
