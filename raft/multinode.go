@@ -6,23 +6,45 @@ import (
 )
 
 // MultiNode represents a node that is participating in multiple consensus groups.
+// A MultiNode is more efficient than a collection of Nodes.
+// The methods of this interface correspond to the methods of Node and are described
+// more fully there.
 type MultiNode interface {
+	// CreateGroup adds a new group to the MultiNode. The application must call CreateGroup
+	// on each particpating node with the same group ID; it may create groups on demand as it
+	// receives messages. If the given storage contains existing log entries the list of peers
+	// may be empty.
 	CreateGroup(group uint64, peers []Peer, storage Storage) error
+	// RemoveGroup removes a group from the MultiNode.
 	RemoveGroup(group uint64) error
+	// Tick advances the internal logical clock by a single tick.
 	Tick()
+	// Campaign causes this MultiNode to transition to candidate state in the given group.
 	Campaign(ctx context.Context, group uint64) error
+	// Propose proposes that data be appended to the given group's log.
 	Propose(ctx context.Context, group uint64, data []byte) error
+	// ProposeConfChange proposes a config change.
 	ProposeConfChange(ctx context.Context, group uint64, cc pb.ConfChange) error
+	// ApplyConfChange applies a config change to the local node.
 	ApplyConfChange(group uint64, cc pb.ConfChange) *pb.ConfState
+	// Step advances the state machine using the given message.
 	Step(ctx context.Context, group uint64, msg pb.Message) error
+	// Ready returns a channel that returns the current point-in-time state of any ready
+	// groups. Only groups with something to report will appear in the map.
 	Ready() <-chan map[uint64]Ready
-	// Advance() must be called with the last value returned from the Ready() channel.
+	// Advance notifies the node that the application has applied and saved progress in the
+	// last Ready results. It must be called with the last value returned from the Ready()
+	// channel.
 	Advance(map[uint64]Ready)
+	// Status returns the current status of the given group.
+	Status(group uint64) Status
+	// Stop performs any necessary termination of the MultiNode.
 	Stop()
-	// TODO: Add Compact. Is Campaign necessary?
 }
 
 // StartMultiNode creates a MultiNode and starts its background goroutine.
+// The id identifies this node and will be used as its node ID in all groups.
+// The election and heartbeat timers are in units of ticks.
 func StartMultiNode(id uint64, election, heartbeat int) MultiNode {
 	mn := newMultiNode(id, election, heartbeat)
 	go mn.run()
@@ -39,6 +61,11 @@ type multiConfChange struct {
 	group uint64
 	msg   pb.ConfChange
 	ch    chan pb.ConfState
+}
+
+type multiStatus struct {
+	group uint64
+	ch    chan Status
 }
 
 type groupCreation struct {
@@ -69,7 +96,9 @@ type multiNode struct {
 	readyc    chan map[uint64]Ready
 	advancec  chan map[uint64]Ready
 	tickc     chan struct{}
+	stop      chan struct{}
 	done      chan struct{}
+	status    chan multiStatus
 }
 
 func newMultiNode(id uint64, election, heartbeat int) multiNode {
@@ -85,7 +114,9 @@ func newMultiNode(id uint64, election, heartbeat int) multiNode {
 		readyc:    make(chan map[uint64]Ready),
 		advancec:  make(chan map[uint64]Ready),
 		tickc:     make(chan struct{}),
+		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
+		status:    make(chan multiStatus),
 	}
 }
 
@@ -133,15 +164,18 @@ func (mn *multiNode) run() {
 	rds := map[uint64]Ready{}
 	var advancec chan map[uint64]Ready
 	for {
+		// Only select readyc if we have something to report and we are not
+		// currently waiting for an advance.
 		readyc := mn.readyc
 		if len(rds) == 0 || advancec != nil {
 			readyc = nil
 		}
 
+		// group points to the group that was touched on this iteration (if any)
 		var group *groupState
 		select {
 		case gc := <-mn.groupc:
-			// TODO(bdarnell): pass applied through gc and into newRaft.
+			// TODO(bdarnell): pass applied through gc and into newRaft. Or get rid of it?
 			r := newRaft(mn.id, nil, mn.election, mn.heartbeat, gc.storage, 0)
 			group = &groupState{
 				id:         gc.id,
@@ -159,6 +193,7 @@ func (mn *multiNode) run() {
 			// TODO(bdarnell): rethink group initialization and whether the application needs
 			// to be able to tell us when it expects the group to exist.
 			if lastIndex == 0 {
+				r.becomeFollower(1, None)
 				ents := make([]pb.Entry, len(gc.peers))
 				for i, peer := range gc.peers {
 					cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
@@ -184,14 +219,17 @@ func (mn *multiNode) run() {
 		case mm := <-mn.propc:
 			// TODO(bdarnell): single-node impl doesn't read from propc unless the group
 			// has a leader; we can't do that since we have one propc for many groups.
-			// We'll have to buffer somewhere on a group-by-group basis.
+			// We'll have to buffer somewhere on a group-by-group basis, or just let
+			// raft.Step drop any such proposals on the floor.
 			mm.msg.From = mn.id
 			group = groups[mm.group]
 			group.raft.Step(mm.msg)
 
 		case mm := <-mn.recvc:
 			group = groups[mm.group]
-			group.raft.Step(mm.msg)
+			if _, ok := group.raft.prs[mm.msg.From]; ok || !IsResponseMsg(mm.msg) {
+				group.raft.Step(mm.msg)
+			}
 
 		case mcc := <-mn.confc:
 			group = groups[mcc.group]
@@ -256,9 +294,14 @@ func (mn *multiNode) run() {
 			}
 			advancec = nil
 
-		case <-mn.done:
+		case ms := <-mn.status:
+			ms.ch <- getStatus(groups[ms.group].raft)
+
+		case <-mn.stop:
+			close(mn.done)
 			return
 		}
+
 		if group != nil {
 			rd := group.newReady()
 			if rd.containsUpdates() {
@@ -299,7 +342,11 @@ func (mn *multiNode) RemoveGroup(id uint64) error {
 }
 
 func (mn *multiNode) Stop() {
-	close(mn.done)
+	select {
+	case mn.stop <- struct{}{}:
+	case <-mn.done:
+	}
+	<-mn.done
 }
 
 func (mn *multiNode) Tick() {
@@ -374,7 +421,7 @@ func (mn *multiNode) ApplyConfChange(group uint64, cc pb.ConfChange) *pb.ConfSta
 
 func (mn *multiNode) Step(ctx context.Context, group uint64, m pb.Message) error {
 	// ignore unexpected local messages receiving over network
-	if m.Type == pb.MsgHup || m.Type == pb.MsgBeat {
+	if IsLocalMsg(m) {
 		// TODO: return an error?
 		return nil
 	}
@@ -390,4 +437,13 @@ func (mn *multiNode) Advance(rds map[uint64]Ready) {
 	case mn.advancec <- rds:
 	case <-mn.done:
 	}
+}
+
+func (mn *multiNode) Status(group uint64) Status {
+	ms := multiStatus{
+		group: group,
+		ch:    make(chan Status),
+	}
+	mn.status <- ms
+	return <-ms.ch
 }
