@@ -109,7 +109,9 @@ func (e *ResolverGroup) Close() {
 }
 
 // Build creates or reuses an etcd resolver for the etcd cluster name identified by the authority part of the target.
-func (b *builder) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOption) (resolver.Resolver, error) {
+func (b *builder) Build(
+	target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOption,
+) (resolver.Resolver, error) {
 	if len(target.Authority) < 1 {
 		return nil, fmt.Errorf("'etcd' target scheme requires non-empty authority identifying etcd cluster being routed to")
 	}

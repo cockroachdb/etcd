@@ -10,10 +10,10 @@ if ! [[ "$0" =~ scripts/genproto.sh ]]; then
 	exit 255
 fi
 
-if [[ $(protoc --version | cut -f2 -d' ') != "3.7.1" ]]; then
-	echo "could not find protoc 3.7.1, is it installed + in PATH?"
-	exit 255
-fi
+#if [[ $(protoc --version | cut -f2 -d' ') != "3.7.1" ]]; then
+#	echo "could not find protoc 3.7.1, is it installed + in PATH?"
+#	exit 255
+#fi
 
 # directories containing protos to be built
 DIRS="./wal/walpb ./etcdserver/etcdserverpb ./etcdserver/api/snap/snappb ./raft/raftpb ./mvcc/mvccpb ./lease/leasepb ./auth/authpb ./etcdserver/api/v3lock/v3lockpb ./etcdserver/api/v3election/v3electionpb"
@@ -22,7 +22,7 @@ DIRS="./wal/walpb ./etcdserver/etcdserverpb ./etcdserver/api/snap/snappb ./raft/
 export GO111MODULE=off
 
 # exact version of packages to build
-GOGO_PROTO_SHA="1adfc126b41513cc696b209667c8656ea7aac67c"
+GOGO_PROTO_SHA="v1.3.1"
 GRPC_GATEWAY_SHA="92583770e3f01b09a0d3e9bdf64321d8bebd48f2"
 SCHWAG_SHA="b7d0fc9aadaaae3d61aaadfc12e4a2f945514912"
 
@@ -60,7 +60,7 @@ popd
 
 # generate gateway code
 go get -u github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway
-go get -u github.com/grpc-ecosystem/grpc-gateway/protoc-gen-swagger
+# go get -u github.com/grpc-ecosystem/grpc-gateway/protoc-gen-swagger
 pushd "${GRPC_GATEWAY_ROOT}"
 	git reset --hard "${GRPC_GATEWAY_SHA}"
 	go install ./protoc-gen-grpc-gateway
@@ -72,7 +72,7 @@ for dir in ${DIRS}; do
 		# shellcheck disable=SC1117
 		sed -i.bak -E 's/go\.etcd\.io\/(gogoproto|github\.com|golang\.org|google\.golang\.org)/\1/g' ./*.pb.go
 		# shellcheck disable=SC1117
-		sed -i.bak -E 's/go\.etcd\.io\/(errors|fmt|io)/\1/g' ./*.pb.go
+		sed -i.bak -E 's/go\.etcd\.io\/(errors|fmt|io|context|math\/bits)/\1/g' ./*.pb.go
 		# shellcheck disable=SC1117
 		sed -i.bak -E 's/import _ \"gogoproto\"//g' ./*.pb.go
 		# shellcheck disable=SC1117
