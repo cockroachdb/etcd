@@ -18,6 +18,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
@@ -833,7 +835,7 @@ func TestScan(t *testing.T) {
 	l.append(entries(half, last)...)
 
 	// Test that scan() returns the same entries as slice(), on all inputs.
-	for _, pageSize := range []entryEncodingSize{0, 1, 10, 100, entrySize, entrySize + 1} {
+	for _, pageSize := range []uint64{0, 1, 10, 100, entrySize, entrySize + 1} {
 		for lo := offset + 1; lo < last; lo++ {
 			for hi := lo; hi <= last; hi++ {
 				var got []pb.Entry

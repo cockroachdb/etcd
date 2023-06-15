@@ -775,12 +775,12 @@ func (r *raft) hasUnappliedConfChanges() bool {
 	// Scan all unapplied committed entries to find a config change. Paginate the
 	// scan, to avoid a potentially unlimited memory spike.
 	lo, hi := r.raftLog.applied+1, r.raftLog.committed+1
-	// Reuse the maxApplyingEntsSize limit because it is used for similar purposes
+	// Reuse the maxNextEntsSize limit because it is used for similar purposes
 	// (limiting the read of unapplied committed entries) when raft sends entries
 	// via the Ready struct for application.
 	// TODO(pavelkalinnikov): find a way to budget memory/bandwidth for this scan
 	// outside the raft package.
-	pageSize := r.raftLog.maxApplyingEntsSize
+	pageSize := r.raftLog.maxNextEntsSize
 	if err := r.raftLog.scan(lo, hi, pageSize, func(ents []pb.Entry) error {
 		for i := range ents {
 			if ents[i].Type == pb.EntryConfChange || ents[i].Type == pb.EntryConfChangeV2 {

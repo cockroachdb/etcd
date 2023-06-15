@@ -346,7 +346,7 @@ func (l *raftLog) restore(s pb.Snapshot) {
 //
 // If the callback returns an error, scan terminates and returns this error
 // immediately. This can be used to stop the scan early ("break" the loop).
-func (l *raftLog) scan(lo, hi uint64, pageSize entryEncodingSize, v func([]pb.Entry) error) error {
+func (l *raftLog) scan(lo, hi uint64, pageSize uint64, v func([]pb.Entry) error) error {
 	for lo < hi {
 		ents, err := l.slice(lo, hi, pageSize)
 		if err != nil {
